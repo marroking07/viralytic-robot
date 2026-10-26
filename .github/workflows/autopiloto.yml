@@ -1,0 +1,258 @@
+name: Autopiloto Viralytic
+
+on:
+  schedule:
+    - cron: '17 */3 * * *'   # cada 3 horas revisa si toca producir un video
+  workflow_dispatch: {}       # botón "Run workflow" para probar a mano
+
+permissions:
+  id-token: write   # para que tu app reconozca a este robot sin contraseñas
+  contents: read
+
+concurrency:
+  group: autopiloto
+  cancel-in-progress: false
+
+jobs:
+  producir:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Instalar ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core > /dev/null
+          sudo apt-get install -y -qq fonts-montserrat > /dev/null || true
+      - name: Producir video
+        env:
+          APP_URL: https://viralytic-ai.pll-studio.workers.dev
+        run: |
+          cat > robot.mjs <<'ROBOT_EOF'
+          // Robot del autopiloto de Viralytic AI.
+          // Corre en GitHub Actions: pide a tu app el siguiente video, genera guion/imágenes/voz con tu app,
+          // arma el MP4 con ffmpeg y lo deja "LISTO PARA REVISIÓN". Nunca publica: tú apruebas en la app.
+          import {execFileSync} from 'node:child_process';
+          import {mkdirSync, writeFileSync, readFileSync, statSync, rmSync} from 'node:fs';
+          import {join} from 'node:path';
+
+          const APP = (process.env.APP_URL || '').replace(/\/$/, '');
+          const WORK = process.env.WORK_DIR || '/tmp/viralytic';
+          if (!APP) throw Error('Falta APP_URL');
+
+          // ---------- Acceso: token de identidad de GitHub (OIDC) o token fijo ----------
+          let cached = {value: '', at: 0};
+          async function credential() {
+            if (process.env.ROBOT_TOKEN) return process.env.ROBOT_TOKEN;
+            if (cached.value && Date.now() - cached.at < 120000) return cached.value;
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL, token = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+            if (!url || !token) throw Error('GitHub no entregó el token de identidad. Revisa "permissions: id-token: write".');
+            const r = await fetch(url + '&audience=viralytic-ai', {headers: {Authorization: 'bearer ' + token}});
+            if (!r.ok) throw Error('No se pudo obtener el token de GitHub (' + r.status + ')');
+            cached = {value: (await r.json()).value, at: Date.now()};
+            return cached.value;
+          }
+
+          async function request(path, init = {}, tries = 3) {
+            for (let attempt = 1; ; attempt++) {
+              let r;
+              try {
+                r = await fetch(APP + '/api/' + path, {
+                  ...init,
+                  headers: {Authorization: 'Bearer ' + (await credential()), ...(init.headers || {})},
+                  signal: AbortSignal.timeout(330000),
+                });
+              } catch (e) {
+                if (attempt < tries) { await sleep(5000 * attempt); continue; }
+                throw Error('Sin conexión con la app en ' + path + ': ' + e.message);
+              }
+              if (r.status >= 500 && r.status !== 503 && attempt < tries) { await sleep(5000 * attempt); continue; }
+              return r;
+            }
+          }
+          const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+          async function api(path, body) {
+            const r = await request(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {})});
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) throw Error(j.error || path + ' respondió ' + r.status);
+            return j;
+          }
+          async function download(url, file) {
+            const r = await request(url.replace(/^\/api\//, ''));
+            if (!r.ok) throw Error('No se pudo descargar ' + url);
+            writeFileSync(file, Buffer.from(await r.arrayBuffer()));
+            return file;
+          }
+
+          // ---------- Producción con la IA de tu app ----------
+          async function produce(p) {
+            const id = p.id;
+            const total = () => p.scenes.length * 2 + 3;
+            let done = 0;
+            const step = (stage, message, scene) =>
+              api('production-state', {id, progress: {stage, message: 'Autopiloto · ' + message, scene, total: p.scenes.length, done, steps: total(), status: 'running'}}).catch(() => {});
+
+            if (!p.autopilot?.scriptDone) {
+              await step('script', 'escribiendo el guion');
+              p = await api('ai-script', {id, brief: p.brief || ''});
+              p = await api('robot/report', {id, scriptDone: true});
+              log('Guion listo: ' + p.title + ' (' + p.scenes.length + ' escenas)');
+            }
+            await step('direction', 'eligiendo voz y estilo');
+            p = await api('ai-direction', {id, force: false});
+            done++;
+            const voice = p.aiVoice || 'marin', style = p.voiceStyle || 'explainer';
+            for (let i = 0; i < p.scenes.length; i++) {
+              if (!p.scenes[i].image) {
+                await step('image', `imagen ${i + 1} de ${p.scenes.length}`, i + 1);
+                p = await api('ai-image', {id, index: i, prompt: p.scenes[i].visualPrompt || '', force: false});
+              }
+              done++;
+              const a = p.scenes[i].audio;
+              if (!a || a.text !== p.scenes[i].text || a.voice !== 'Voz IA · ' + voice || a.style !== style) {
+                await step('voice', `voz ${i + 1} de ${p.scenes.length}`, i + 1);
+                p = await api('voice', {id, index: i, voice, voiceStyle: style, force: false});
+              }
+              done++;
+              log(`Escena ${i + 1}/${p.scenes.length} lista`);
+            }
+            if (!p.thumbnailImage) {
+              await step('thumbnail', 'creando la portada');
+              p = await api('ai-thumbnail', {id, title: p.coverTitle || p.title, prompt: p.coverPrompt || ''});
+            }
+            done++;
+            await step('render', 'armando el video');
+            const job = await api('render', {id});
+            const {file, durations} = await render(job);
+            log('Video armado: ' + (statSync(file).size / 1e6).toFixed(1) + ' MB');
+            const r = await request('video', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'video/mp4',
+                'X-Project-Id': id,
+                'X-Render-Token': job.renderToken,
+                'X-Scene-Durations': JSON.stringify(durations),
+              },
+              body: readFileSync(file),
+            });
+            const result = await r.json().catch(() => ({}));
+            if (!r.ok) throw Error(result.error || 'La app no aceptó el video');
+            await api('production-state', {id, progress: {stage: 'complete', message: 'Autopiloto · listo para tu aprobación', total: p.scenes.length, done: total(), steps: total(), status: 'complete'}}).catch(() => {});
+            return result;
+          }
+
+          // ---------- Armado del video con ffmpeg ----------
+          const ff = (args) => execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...args], {stdio: ['ignore', 'inherit', 'inherit']});
+          const probe = (file) => Number(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file]).toString().trim()) || 0;
+
+          function assTime(t) {
+            const cs = Math.max(0, Math.round(t * 100));
+            const h = Math.floor(cs / 360000), m = Math.floor(cs / 6000) % 60, s = Math.floor(cs / 100) % 60, c = cs % 100;
+            return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(c).padStart(2, '0')}`;
+          }
+          export function subtitleFile(text, duration, W, H) {
+            const vertical = H > W;
+            const words = text.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+            const per = vertical ? 4 : 6, chunks = [];
+            for (let i = 0; i < words.length; i += per) chunks.push(words.slice(i, i + per).join(' '));
+            if (chunks.length > 1 && !chunks[chunks.length - 1].includes(' ')) chunks[chunks.length - 2] += ' ' + chunks.pop();
+            const weight = chunks.map((c) => Math.max(4, c.length));
+            const sum = weight.reduce((a, b) => a + b, 0) || 1;
+            let t = 0.05;
+            const events = chunks.map((c, i) => {
+              const d = (duration - 0.15) * (weight[i] / sum);
+              const line = `Dialogue: 0,${assTime(t)},${assTime(t + d)},Main,,0,0,0,,${c.replace(/[{}\\]/g, '')}`;
+              t += d;
+              return line;
+            });
+            return [
+              '[Script Info]', 'ScriptType: v4.00+', `PlayResX: ${W}`, `PlayResY: ${H}`, 'WrapStyle: 0', '',
+              '[V4+ Styles]',
+              'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
+              `Style: Main,Montserrat,${vertical ? 84 : 64},&H00FFFFFF,&H00FFFFFF,&H00101010,&H64000000,-1,0,0,0,100,100,0,0,1,${vertical ? 6 : 5},2,2,80,80,${vertical ? 430 : 110},1`,
+              '', '[Events]', 'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text', ...events, '',
+            ].join('\n');
+          }
+
+          export function motion(i, frames) {
+            const N = Math.max(1, frames - 1);
+            const zoomIn = i % 4 !== 1;
+            const z = zoomIn ? `1.0+0.10*on/${N}` : `1.10-0.10*on/${N}`;
+            const dir = i % 2 === 0 ? 1 : -1;
+            const x = `(iw-iw/zoom)/2+${dir}*(iw-iw/zoom)/2*0.6*(2*on/${N}-1)`;
+            const y = i % 3 === 0 ? `(ih-ih/zoom)/2+(ih-ih/zoom)/2*0.5*(2*on/${N}-1)` : `(ih-ih/zoom)/2`;
+            return {z, x, y};
+          }
+
+          export async function render(p, fetchAssets = true) {
+            const W = p.format === 'Short' ? 1080 : 1920, H = p.format === 'Short' ? 1920 : 1080, FPS = 30;
+            const dir = join(WORK, p.id);
+            rmSync(dir, {recursive: true, force: true});
+            mkdirSync(dir, {recursive: true});
+            const clips = [], durations = [];
+            for (let i = 0; i < p.scenes.length; i++) {
+              const s = p.scenes[i];
+              const img = join(dir, `img-${i}.jpg`), aud = join(dir, `aud-${i}.mp3`);
+              if (fetchAssets) {
+                if (s.image) await download(s.image.url, img);
+                if (s.audio && s.audio.text === s.text) await download(s.audio.url, aud);
+              }
+              const hasImg = !!s.image, hasAud = !!(s.audio && s.audio.text === s.text);
+              const audioLen = hasAud ? probe(aud) : 0;
+              const dur = Math.min(30, Math.max(1, Number(s.duration) || 4, audioLen + 0.35));
+              durations.push(Math.round(dur * 100) / 100);
+              const frames = Math.round(dur * FPS);
+              writeFileSync(join(dir, `sub-${i}.ass`), subtitleFile(s.text, dur, W, H));
+              const m = motion(i, frames);
+              const fadeOut = Math.max(0, dur - 0.25).toFixed(2);
+              const video = hasImg
+                ? `[0:v]scale=${W * 2}:${H * 2}:force_original_aspect_ratio=increase,crop=${W * 2}:${H * 2},setsar=1,` +
+                  `zoompan=z='${m.z}':x='${m.x}':y='${m.y}':d=${frames}:s=${W}x${H}:fps=${FPS},`
+                : `[0:v]`;
+              const filter =
+                video +
+                `format=yuv420p,subtitles=sub-${i}.ass,fade=t=in:st=0:d=0.25,fade=t=out:st=${fadeOut}:d=0.25[v];` +
+                `[1:a]aresample=48000,aformat=channel_layouts=stereo,apad,atrim=0:${dur.toFixed(2)},loudnorm=I=-15:TP=-1.5:LRA=11,aresample=48000[a]`;
+              const inputs = hasImg ? ['-i', img] : ['-f', 'lavfi', '-i', `color=c=0x101a24:s=${W}x${H}:r=${FPS}:d=${dur.toFixed(2)}`];
+              const audioIn = hasAud ? ['-i', aud] : ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo'];
+              const out = join(dir, `clip-${i}.mp4`);
+              execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...inputs, ...audioIn, '-filter_complex', filter, '-map', '[v]', '-map', '[a]',
+                '-t', dur.toFixed(2), '-r', String(FPS), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', p.format === 'Short' ? '22' : '24',
+                '-maxrate', p.format === 'Short' ? '8M' : '4M', '-bufsize', '16M', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k', '-ar', '48000', out],
+                {cwd: dir, stdio: ['ignore', 'inherit', 'inherit']});
+              clips.push(out);
+            }
+            writeFileSync(join(dir, 'list.txt'), clips.map((c) => `file '${c}'`).join('\n'));
+            const file = join(dir, 'video.mp4');
+            ff(['-f', 'concat', '-safe', '0', '-i', join(dir, 'list.txt'), '-c', 'copy', '-movflags', '+faststart', file]);
+            if (statSync(file).size > 90e6) {
+              const smaller = join(dir, 'video-small.mp4');
+              ff(['-i', file, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28', '-maxrate', '2500k', '-bufsize', '5M', '-c:a', 'copy', '-movflags', '+faststart', smaller]);
+              return {file: smaller, durations};
+            }
+            return {file, durations};
+          }
+
+          const log = (m) => console.log(new Date().toISOString().slice(11, 19) + ' ' + m);
+
+          async function main() {
+            const next = await api('robot/next', {});
+            if (next.action !== 'produce') { log('Nada que hacer: ' + next.reason); return; }
+            const p = next.project;
+            log('Produciendo: ' + p.topic);
+            try {
+              await produce(p);
+              log('Listo. El video espera tu aprobación en la app.');
+            } catch (e) {
+              log('Error: ' + e.message);
+              await api('robot/report', {id: p.id, error: e.message}).catch(() => {});
+              process.exitCode = 1;
+            }
+          }
+
+          if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop())) await main();
+          ROBOT_EOF
+          node robot.mjs
