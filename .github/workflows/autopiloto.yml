@@ -238,7 +238,7 @@ jobs:
               writeFileSync(join(dir, `sub-${i}.ass`), subtitleFile(s.text, dur, W, H, i === 0 && hook ? {hook} : {}));
               const m = motion(i, frames);
               const fadeOut = Math.max(0, dur - 0.18).toFixed(2);
-              const look = horror ? 'eq=saturation=0.72:contrast=1.10:brightness=-0.035:gamma=0.95,colorbalance=bs=0.06:bm=0.03:rh=-0.02,vignette=PI/4.2,noise=alls=6:allf=t,' : 'eq=contrast=1.04:saturation=1.05,';
+              const look = horror ? 'eq=saturation=0.82:contrast=1.06:brightness=0.03:gamma=1.12,colorbalance=bs=0.05:bm=0.02,vignette=PI/5.5,noise=alls=5:allf=t,' : 'eq=contrast=1.04:saturation=1.05,';
               const flash = i === twist ? 'fade=t=in:st=0:d=0.22:color=white,' : 'fade=t=in:st=0:d=0.15,';
               const video = hasImg
                 ? `[0:v]scale=${W * 2}:${H * 2}:force_original_aspect_ratio=increase,crop=${W * 2}:${H * 2},setsar=1,` +
