@@ -148,51 +148,80 @@ jobs:
           const ff = (args) => execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...args], {stdio: ['ignore', 'inherit', 'inherit']});
           const probe = (file) => Number(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file]).toString().trim()) || 0;
 
+          // Palabras sin peso para elegir la palabra clave resaltada.
+          const STOP = new Set('a al ante con contra de del desde el ella ellos en entre era es esa ese eso esta este esto ha hay la las le les lo los mas me mi muy nada ni no nos o para pero por que se si sin sobre su sus te tu tú un una uno unos y ya yo cuando donde como qué cómo'.split(' '));
+          const assEscape = (t) => t.replace(/[{}\\]/g, '');
+
           function assTime(t) {
             const cs = Math.max(0, Math.round(t * 100));
             const h = Math.floor(cs / 360000), m = Math.floor(cs / 6000) % 60, s = Math.floor(cs / 100) % 60, c = cs % 100;
             return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(c).padStart(2, '0')}`;
           }
-          export function subtitleFile(text, duration, W, H) {
+
+          /** Subtítulos estilo Short: 2-3 palabras grandes en mayúsculas, palabra clave en amarillo y entrada con "pop". */
+          export function subtitleFile(text, duration, W, H, opts = {}) {
             const vertical = H > W;
             const words = text.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
-            const per = vertical ? 4 : 6, chunks = [];
-            for (let i = 0; i < words.length; i += per) chunks.push(words.slice(i, i + per).join(' '));
-            if (chunks.length > 1 && !chunks[chunks.length - 1].includes(' ')) chunks[chunks.length - 2] += ' ' + chunks.pop();
-            const weight = chunks.map((c) => Math.max(4, c.length));
+            const per = vertical ? 3 : 5, chunks = [];
+            for (let i = 0; i < words.length; i += per) chunks.push(words.slice(i, i + per));
+            if (chunks.length > 1 && chunks[chunks.length - 1].length === 1) chunks[chunks.length - 2].push(...chunks.pop());
+            const weight = chunks.map((c) => Math.max(5, c.join(' ').length));
             const sum = weight.reduce((a, b) => a + b, 0) || 1;
             let t = 0.05;
             const events = chunks.map((c, i) => {
               const d = (duration - 0.15) * (weight[i] / sum);
-              const line = `Dialogue: 0,${assTime(t)},${assTime(t + d)},Main,,0,0,0,,${c.replace(/[{}\\]/g, '')}`;
+              let key = -1, best = 0;
+              c.forEach((w, j) => {
+                const clean = w.toLowerCase().replace(/[^a-záéíóúñü0-9]/gi, '');
+                if (!STOP.has(clean) && clean.length > best) { best = clean.length; key = j; }
+              });
+              const line = c.map((w, j) => (j === key ? `{\\c&H0000E1FF&}${assEscape(w.toUpperCase())}{\\c&H00FFFFFF&}` : assEscape(w.toUpperCase()))).join(' ');
+              const ev = `Dialogue: 1,${assTime(t)},${assTime(t + d)},Main,,0,0,0,,{\\fscx82\\fscy82\\t(0,110,\\fscx100\\fscy100)}${line}`;
               t += d;
-              return line;
+              return ev;
             });
+            if (opts.hook) {
+              // Frase gancho grande al inicio para detener el scroll.
+              events.unshift(`Dialogue: 2,${assTime(0)},${assTime(Math.min(2.8, duration))},Hook,,0,0,0,,{\\fad(80,250)\\fscx90\\fscy90\\t(0,140,\\fscx100\\fscy100)}${assEscape(opts.hook.toUpperCase())}`);
+            }
             return [
               '[Script Info]', 'ScriptType: v4.00+', `PlayResX: ${W}`, `PlayResY: ${H}`, 'WrapStyle: 0', '',
               '[V4+ Styles]',
               'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-              `Style: Main,Montserrat,${vertical ? 84 : 64},&H00FFFFFF,&H00FFFFFF,&H00101010,&H64000000,-1,0,0,0,100,100,0,0,1,${vertical ? 6 : 5},2,2,80,80,${vertical ? 430 : 110},1`,
+              `Style: Main,Montserrat,${vertical ? 96 : 72},&H00FFFFFF,&H00FFFFFF,&H00000000,&H96000000,-1,0,0,0,100,100,1,0,1,${vertical ? 8 : 6},3,2,70,70,${vertical ? 620 : 140},1`,
+              `Style: Hook,Montserrat,${vertical ? 124 : 88},&H00FFFFFF,&H00FFFFFF,&H00000000,&HB4101010,-1,0,0,0,100,100,1,0,3,${vertical ? 18 : 14},0,8,70,70,${vertical ? 300 : 90},1`,
               '', '[Events]', 'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text', ...events, '',
             ].join('\n');
           }
 
+          /** Movimiento de cámara con "punch-in" a la mitad de la escena para darle ritmo (un corte sin cambiar de imagen). */
           export function motion(i, frames) {
-            const N = Math.max(1, frames - 1);
-            const zoomIn = i % 4 !== 1;
-            const z = zoomIn ? `1.0+0.10*on/${N}` : `1.10-0.10*on/${N}`;
+            const N = Math.max(1, frames - 1), half = Math.round(N / 2);
+            const zoomIn = i % 3 !== 1;
+            const base = zoomIn ? `1.0+0.16*on/${N}` : `1.16-0.16*on/${N}`;
+            const z = `${base}+if(gte(on\\,${half})\\,0.10\\,0)`;
             const dir = i % 2 === 0 ? 1 : -1;
-            const x = `(iw-iw/zoom)/2+${dir}*(iw-iw/zoom)/2*0.6*(2*on/${N}-1)`;
-            const y = i % 3 === 0 ? `(ih-ih/zoom)/2+(ih-ih/zoom)/2*0.5*(2*on/${N}-1)` : `(ih-ih/zoom)/2`;
+            const x = `(iw-iw/zoom)/2+${dir}*(iw-iw/zoom)/2*0.55*(2*on/${N}-1)`;
+            const y = i % 3 === 0 ? `(ih-ih/zoom)/2+(ih-ih/zoom)/2*0.45*(2*on/${N}-1)` : `(ih-ih/zoom)*0.42`;
             return {z, x, y};
+          }
+
+          /** Índice de la escena del giro (para el destello y el golpe de sonido). */
+          export function twistIndex(p) {
+            const n = p.scenes.length;
+            const byRole = p.scenes.findIndex((s) => s.role === 'CAMBIO DE RITMO');
+            return byRole > 0 ? byRole : Math.max(1, n - 2);
           }
 
           export async function render(p, fetchAssets = true) {
             const W = p.format === 'Short' ? 1080 : 1920, H = p.format === 'Short' ? 1920 : 1080, FPS = 30;
+            const horror = p.voiceStyle === 'suspense' || p.research?.mode === 'fiction' || p.productionSettings?.mode === 'fiction';
             const dir = join(WORK, p.id);
             rmSync(dir, {recursive: true, force: true});
             mkdirSync(dir, {recursive: true});
             const clips = [], durations = [];
+            const twist = twistIndex(p);
+            const hook = String(p.coverTitle || p.title || '').slice(0, 55);
             for (let i = 0; i < p.scenes.length; i++) {
               const s = p.scenes[i];
               const img = join(dir, `img-${i}.jpg`), aud = join(dir, `aud-${i}.mp3`);
@@ -202,46 +231,69 @@ jobs:
               }
               const hasImg = !!s.image, hasAud = !!(s.audio && s.audio.text === s.text);
               const audioLen = hasAud ? probe(aud) : 0;
-              const dur = Math.min(30, Math.max(1, Number(s.duration) || 4, audioLen + 0.35));
+              // Ritmo: la escena dura lo que dura la voz + un respiro corto (no se estira al tiempo sugerido).
+              const dur = Math.min(30, Math.max(1.5, hasAud ? audioLen + 0.25 : Number(s.duration) || 4));
               durations.push(Math.round(dur * 100) / 100);
               const frames = Math.round(dur * FPS);
-              writeFileSync(join(dir, `sub-${i}.ass`), subtitleFile(s.text, dur, W, H));
+              writeFileSync(join(dir, `sub-${i}.ass`), subtitleFile(s.text, dur, W, H, i === 0 && hook ? {hook} : {}));
               const m = motion(i, frames);
-              const fadeOut = Math.max(0, dur - 0.25).toFixed(2);
+              const fadeOut = Math.max(0, dur - 0.18).toFixed(2);
+              const look = horror ? 'eq=saturation=0.72:contrast=1.10:brightness=-0.035:gamma=0.95,colorbalance=bs=0.06:bm=0.03:rh=-0.02,vignette=PI/4.2,noise=alls=6:allf=t,' : 'eq=contrast=1.04:saturation=1.05,';
+              const flash = i === twist ? 'fade=t=in:st=0:d=0.22:color=white,' : 'fade=t=in:st=0:d=0.15,';
               const video = hasImg
                 ? `[0:v]scale=${W * 2}:${H * 2}:force_original_aspect_ratio=increase,crop=${W * 2}:${H * 2},setsar=1,` +
                   `zoompan=z='${m.z}':x='${m.x}':y='${m.y}':d=${frames}:s=${W}x${H}:fps=${FPS},`
                 : `[0:v]`;
               const filter =
-                video +
-                `format=yuv420p,subtitles=sub-${i}.ass,fade=t=in:st=0:d=0.25,fade=t=out:st=${fadeOut}:d=0.25[v];` +
-                `[1:a]aresample=48000,aformat=channel_layouts=stereo,apad,atrim=0:${dur.toFixed(2)},loudnorm=I=-15:TP=-1.5:LRA=11,aresample=48000[a]`;
-              const inputs = hasImg ? ['-i', img] : ['-f', 'lavfi', '-i', `color=c=0x101a24:s=${W}x${H}:r=${FPS}:d=${dur.toFixed(2)}`];
+                video + look +
+                `format=yuv420p,subtitles=sub-${i}.ass,${flash}fade=t=out:st=${fadeOut}:d=0.18[v];` +
+                `[1:a]aresample=48000,aformat=channel_layouts=stereo,apad,atrim=0:${dur.toFixed(2)},loudnorm=I=-14:TP=-1.5:LRA=9,aresample=48000[a]`;
+              const inputs = hasImg ? ['-i', img] : ['-f', 'lavfi', '-i', `color=c=0x0b0d10:s=${W}x${H}:r=${FPS}:d=${dur.toFixed(2)}`];
               const audioIn = hasAud ? ['-i', aud] : ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo'];
               const out = join(dir, `clip-${i}.mp4`);
               execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...inputs, ...audioIn, '-filter_complex', filter, '-map', '[v]', '-map', '[a]',
-                '-t', dur.toFixed(2), '-r', String(FPS), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', p.format === 'Short' ? '22' : '24',
-                '-maxrate', p.format === 'Short' ? '8M' : '4M', '-bufsize', '16M', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k', '-ar', '48000', out],
+                '-t', dur.toFixed(2), '-r', String(FPS), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', p.format === 'Short' ? '23' : '24',
+                '-maxrate', p.format === 'Short' ? '6M' : '4M', '-bufsize', '12M', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k', '-ar', '48000', out],
                 {cwd: dir, stdio: ['ignore', 'inherit', 'inherit']});
               clips.push(out);
             }
             writeFileSync(join(dir, 'list.txt'), clips.map((c) => `file '${c}'`).join('\n'));
             let file = join(dir, 'video.mp4');
             ff(['-f', 'concat', '-safe', '0', '-i', join(dir, 'list.txt'), '-c', 'copy', '-movflags', '+faststart', file]);
+
+            // Capa de sonido: ambiente (si está activo) + "swoosh" en cada corte + golpe grave en el giro. Todo generado aquí, sin material de terceros.
+            const D = durations.reduce((a, b) => a + b, 0);
+            const starts = durations.map((_, i) => durations.slice(0, i).reduce((a, b) => a + b, 0));
+            const inputs = ['-i', file];
+            const parts = [];
+            let n = 1;
             if (p.music) {
-              // Ambiente original de suspenso generado aquí (ruido grave filtrado + notas bajas), sin música de terceros.
-              const D = durations.reduce((a, b) => a + b, 0).toFixed(2), end = Math.max(0, Number(D) - 2.5).toFixed(2);
-              const withMusic = join(dir, 'video-musica.mp4');
-              ff(['-i', file,
-                '-f', 'lavfi', '-i', `anoisesrc=d=${D}:c=brown:a=0.5,lowpass=f=260,highpass=f=35`,
-                '-f', 'lavfi', '-i', `sine=f=55:d=${D}`,
-                '-f', 'lavfi', '-i', `sine=f=82.4:d=${D}`,
-                '-filter_complex',
-                `[1:a]volume=0.35[n];[2:a]volume=0.10,tremolo=f=0.15:d=0.7[s1];[3:a]volume=0.06,tremolo=f=0.11:d=0.8[s2];` +
-                `[n][s1][s2]amix=inputs=3:normalize=0,aformat=channel_layouts=stereo,afade=t=in:st=0:d=2,afade=t=out:st=${end}:d=2.5,volume=2.6[m];` +
-                `[0:a][m]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[a]`,
-                '-map', '0:v', '-map', '[a]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', withMusic]);
-              file = withMusic;
+              const end = Math.max(0, D - 2.5).toFixed(2);
+              inputs.push('-f', 'lavfi', '-i', `anoisesrc=d=${D.toFixed(2)}:c=brown:a=0.5,lowpass=f=260,highpass=f=35`, '-f', 'lavfi', '-i', `sine=f=55:d=${D.toFixed(2)}`, '-f', 'lavfi', '-i', `sine=f=82.4:d=${D.toFixed(2)}`);
+              parts.push(`[${n}:a]volume=0.35[n0];[${n + 1}:a]volume=0.10,tremolo=f=0.15:d=0.7[n1];[${n + 2}:a]volume=0.06,tremolo=f=0.11:d=0.8[n2];` +
+                `[n0][n1][n2]amix=inputs=3:normalize=0,aformat=channel_layouts=stereo,afade=t=in:st=0:d=2,afade=t=out:st=${end}:d=2.5,volume=2.6[amb]`);
+              n += 3;
+            }
+            const sfx = [];
+            starts.slice(1).forEach((st, k) => {
+              if (k + 1 === twist) return;
+              inputs.push('-f', 'lavfi', '-i', 'anoisesrc=d=0.45:c=pink:a=0.6');
+              sfx.push(`[${n}:a]highpass=f=900,lowpass=f=6000,afade=t=in:st=0:d=0.22,afade=t=out:st=0.22:d=0.23,volume=0.16,aformat=channel_layouts=stereo,adelay=${Math.max(0, Math.round((st - 0.2) * 1000))}:all=1[w${k}]`);
+              n++;
+            });
+            if (twist < starts.length) {
+              inputs.push('-f', 'lavfi', '-i', 'sine=f=48:d=1.6', '-f', 'lavfi', '-i', 'anoisesrc=d=0.25:c=brown:a=0.9');
+              sfx.push(`[${n}:a]afade=t=out:st=0:d=1.6,volume=1.1[bs];[${n + 1}:a]lowpass=f=180,afade=t=out:st=0:d=0.25,volume=0.9[bn];[bs][bn]amix=inputs=2:normalize=0,aformat=channel_layouts=stereo,adelay=${Math.round(starts[twist] * 1000)}:all=1[boom]`);
+              n += 2;
+            }
+            const layers = [...(p.music ? ['[amb]'] : []), ...sfx.map((s) => s.match(/\[(\w+)\]$/)[1]).map((l) => `[${l}]`)];
+            if (layers.length) {
+              const withFx = join(dir, 'video-final.mp4');
+              const graph = [...parts, ...sfx,
+                `${layers.join('')}amix=inputs=${layers.length}:normalize=0,apad,atrim=0:${D.toFixed(2)}[bed]`,
+                `[0:a][bed]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[a]`].join(';');
+              ff([...inputs, '-filter_complex', graph, '-map', '0:v', '-map', '[a]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', withFx]);
+              file = withFx;
             }
             if (statSync(file).size > 90e6) {
               const smaller = join(dir, 'video-small.mp4');
