@@ -26,7 +26,7 @@ jobs:
           const cur = await g.json();
           console.log('ANTES', g.status, JSON.stringify(cur.settings).slice(0, 600));
           if (!g.ok) process.exit(1);
-          const p = await fetch(APP + '/api/autopilot', {method: 'POST', headers: H, body: JSON.stringify({...cur.settings, enabled: true, canal: 'donchito'})});
+          const p = await fetch(APP + '/api/autopilot', {method: 'POST', headers: H, body: JSON.stringify({...cur.settings, enabled: true, perDay: Math.max(cur.settings.perDay || 1, (cur.summary?.today || 0) + 1), canal: 'donchito'})});
           const out = await p.json();
           console.log('DESPUES', p.status, 'enabled=' + out.settings?.enabled, 'canal=' + out.channel, 'temas=' + (out.settings?.queue || []).length);
           const m = await fetch(APP + '/api/autopilot?canal=marro', {headers: H}).then(r => r.json());
