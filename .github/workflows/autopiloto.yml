@@ -16,27 +16,41 @@ concurrency:
 jobs:
   producir:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Instalar ffmpeg
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Instalar ffmpeg y voces gratis (edge-tts)
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg fonts-dejavu-core > /dev/null
           sudo apt-get install -y -qq fonts-montserrat > /dev/null || true
+          pip install -q edge-tts
+      - name: Recordar Remotion entre corridas
+        uses: actions/cache@v4
+        with:
+          path: /tmp/remotion-kit/node_modules
+          key: remotion-4.0.528-v1
       - name: Producir video
         env:
           APP_URL: https://viralytic-ai.pll-studio.workers.dev
+          REMOTION_DIR: /tmp/remotion-kit
+          REMOTION_DIR: /tmp/remotion-kit
         run: |
           cat > robot.mjs <<'ROBOT_EOF'
           // Robot del autopiloto de Viralytic AI.
-          // Corre en GitHub Actions: pide a tu app el siguiente video, genera guion/imágenes/voz con tu app,
-          // arma el MP4 con ffmpeg y lo deja "LISTO PARA REVISIÓN". Nunca publica: tú apruebas en la app.
+          // Corre en GitHub Actions: pide a tu app el siguiente video, genera guion/imágenes con tu app,
+          // la voz con edge-tts (gratis) y arma el MP4 (MARRO con ffmpeg, Don Chito con Remotion).
+          // Lo deja "LISTO PARA REVISIÓN". Nunca publica: tú apruebas en la app.
           import {execFileSync} from 'node:child_process';
-          import {mkdirSync, writeFileSync, readFileSync, statSync, rmSync} from 'node:fs';
+          import {mkdirSync, writeFileSync, readFileSync, statSync, rmSync, existsSync} from 'node:fs';
           import {join} from 'node:path';
+          import {createHash} from 'node:crypto';
+          import {cpus} from 'node:os';
 
           const APP = (process.env.APP_URL || '').replace(/\/$/, '');
           const WORK = process.env.WORK_DIR || '/tmp/viralytic';
@@ -87,8 +101,73 @@ jobs:
             return file;
           }
 
+          // ---------- Voz gratis con edge-tts (voces de Microsoft) ----------
+          let edgeBroken = false;
+          const EDGE_PY = `
+          import asyncio, sys, json, edge_tts
+          async def main(text, voice, rate, pitch, out, words):
+              try:
+                  c = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, boundary="WordBoundary")
+              except TypeError:
+                  c = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+              ws = []
+              with open(out, "wb") as f:
+                  async for ch in c.stream():
+                      if ch["type"] == "audio":
+                          f.write(ch["data"])
+                      elif ch["type"] == "WordBoundary":
+                          ws.append({"t": round(ch["offset"] / 1e7, 3), "w": ch["text"]})
+              with open(words, "w", encoding="utf-8") as f:
+                  json.dump(ws, f, ensure_ascii=False)
+          asyncio.run(main(*sys.argv[1:]))
+          `;
+
+          /** Genera la voz de una escena con edge-tts y la sube a la app (con los tiempos de cada palabra para los subtítulos). */
+          async function edgeVoice(p, i, {rate = '+0%', pitch = '+0Hz'} = {}) {
+            const dir = join(WORK, 'tts');
+            mkdirSync(dir, {recursive: true});
+            const py = join(dir, 'edge.py');
+            if (!existsSync(py)) writeFileSync(py, EDGE_PY);
+            const text = p.scenes[i].text, voice = p.edgeVoice || 'es-MX-JorgeNeural';
+            const out = join(dir, `${p.id}-${i}.mp3`), words = join(dir, `${p.id}-${i}.json`);
+            let last;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                execFileSync('python3', [py, text, voice, rate, pitch, out, words], {stdio: ['ignore', 'ignore', 'pipe'], timeout: 120000});
+                if (statSync(out).size > 1000) { last = null; break; }
+                last = Error('audio vacío');
+              } catch (e) {
+                last = Error(String(e.stderr || e.message).trim().split('\n').pop());
+              }
+              await sleep(3000 * attempt);
+            }
+            if (last) throw last;
+            let w = '';
+            try {
+              const b64 = Buffer.from(readFileSync(words, 'utf8')).toString('base64');
+              if (b64.length < 7500) w = b64;
+            } catch {}
+            const r = await request('audio-upload', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'audio/mpeg',
+                'X-Project-Id': p.id,
+                'X-Scene-Index': String(i),
+                'X-Scene-Hash': createHash('sha256').update(text).digest('hex'),
+                'X-Voice-Engine': 'edge-tts',
+                'X-Voice-Id': voice,
+                ...(w ? {'X-Words': w} : {}),
+              },
+              body: readFileSync(out),
+            });
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) throw Error(j.error || 'La app no aceptó la voz');
+            return j;
+          }
+
           // ---------- Producción con la IA de tu app ----------
           async function produce(p) {
+            if (p.channel === 'donchito') return produceDonChito(p);
             const id = p.id;
             const total = () => p.scenes.length * 2 + 3;
             let done = 0;
@@ -112,9 +191,21 @@ jobs:
               }
               done++;
               const a = p.scenes[i].audio;
-              if (!a || a.text !== p.scenes[i].text || a.voice !== 'Voz IA · ' + voice || a.style !== style) {
+              const edge = p.voiceEngine === 'edge' && !edgeBroken;
+              const wanted = edge ? 'Edge · ' + (p.edgeVoice || 'es-MX-JorgeNeural') : 'Voz IA · ' + voice;
+              if (!a || a.text !== p.scenes[i].text || a.voice !== wanted || (!edge && a.style !== style)) {
                 await step('voice', `voz ${i + 1} de ${p.scenes.length}`, i + 1);
-                p = await api('voice', {id, index: i, voice, voiceStyle: style, force: false});
+                let ok = false;
+                if (edge) {
+                  try {
+                    p = await edgeVoice(p, i, {rate: '-6%', pitch: '-4Hz'});
+                    ok = true;
+                  } catch (e) {
+                    edgeBroken = true;
+                    log('edge-tts falló, se usa la voz de OpenAI: ' + e.message);
+                  }
+                }
+                if (!ok) p = await api('voice', {id, index: i, voice, voiceStyle: style, force: false});
               }
               done++;
               log(`Escena ${i + 1}/${p.scenes.length} lista`);
@@ -142,6 +233,143 @@ jobs:
             if (!r.ok) throw Error(result.error || 'La app no aceptó el video');
             await api('production-state', {id, progress: {stage: 'complete', message: 'Autopiloto · listo para tu aprobación', total: p.scenes.length, done: total(), steps: total(), status: 'complete'}}).catch(() => {});
             return result;
+          }
+
+          // ---------- Don Chito: guion e imágenes gratis (app), voz edge-tts, edición con Remotion ----------
+          async function produceDonChito(p) {
+            const id = p.id;
+            const steps = () => p.scenes.length * 2 + 3;
+            let done = 0;
+            const step = (stage, message, scene) =>
+              api('production-state', {id, progress: {stage, message: 'Don Chito · ' + message, scene, total: p.scenes.length, done, steps: steps(), status: 'running'}}).catch(() => {});
+
+            if (!p.autopilot?.scriptDone) {
+              await step('script', 'escribiendo el guion (IA gratis)');
+              p = await api('ai-script', {id, brief: p.brief || ''});
+              p = await api('robot/report', {id, scriptDone: true});
+              log('Guion listo: ' + p.title + ' (' + p.scenes.length + ' escenas)');
+            }
+            for (let i = 0; i < p.scenes.length; i++) {
+              if (!p.scenes[i].image) {
+                await step('image', `dibujando escena ${i + 1} de ${p.scenes.length}`, i + 1);
+                p = await api('ai-image', {id, index: i, prompt: p.scenes[i].visualPrompt || '', force: false});
+              }
+              done++;
+              const a = p.scenes[i].audio;
+              if (!a || a.text !== p.scenes[i].text || !String(a.voice || '').startsWith('Edge · ')) {
+                await step('voice', `voz ${i + 1} de ${p.scenes.length}`, i + 1);
+                p = await edgeVoice(p, i, {rate: '+4%', pitch: '-2Hz'});
+              }
+              done++;
+              if (i % 5 === 4 || i === p.scenes.length - 1) log(`Escenas ${i + 1}/${p.scenes.length} listas`);
+            }
+            if (!p.thumbnailImage) {
+              await step('thumbnail', 'creando la portada');
+              p = await api('ai-thumbnail', {id, title: p.coverTitle || p.title, prompt: p.coverPrompt || ''}).catch((e) => (log('Portada: ' + e.message), p));
+            }
+            done++;
+            await step('render', 'editando con Remotion');
+            const job = await api('render', {id});
+            const {file, durations} = await renderRemotion(job);
+            log('Video armado: ' + (statSync(file).size / 1e6).toFixed(1) + ' MB');
+            const r = await request('video', {
+              method: 'POST',
+              headers: {'Content-Type': 'video/mp4', 'X-Project-Id': id, 'X-Render-Token': job.renderToken, 'X-Scene-Durations': JSON.stringify(durations)},
+              body: readFileSync(file),
+            });
+            const result = await r.json().catch(() => ({}));
+            if (!r.ok) throw Error(result.error || 'La app no aceptó el video');
+            await api('production-state', {id, progress: {stage: 'complete', message: 'Don Chito · listo para tu aprobación', total: p.scenes.length, done: steps(), steps: steps(), status: 'complete'}}).catch(() => {});
+
+            // Del video largo salen 3 Shorts (mismas imágenes y voz, sin gastar IA).
+            if (p.format !== 'Short') {
+              const {created = []} = await api('robot/shorts', {id}).catch((e) => (log('Shorts: ' + e.message), {}));
+              for (const c of created) {
+                try {
+                  log('Short: ' + c.title);
+                  await produceDonChito(c);
+                } catch (e) {
+                  log('Short con error: ' + e.message);
+                  await api('robot/report', {id: c.id, error: e.message}).catch(() => {});
+                }
+              }
+            }
+            return result;
+          }
+
+          const KIT = {
+          "package.json": "{\n  \"name\": \"donchito-remotion\",\n  \"private\": true,\n  \"dependencies\": {\n    \"@remotion/cli\": \"4.0.528\",\n    \"remotion\": \"4.0.528\",\n    \"react\": \"19.2.0\",\n    \"react-dom\": \"19.2.0\"\n  }\n}\n",
+          "src/index.ts": "import {registerRoot} from 'remotion';\nimport {RemotionRoot} from './Root';\nregisterRoot(RemotionRoot);\n",
+          "src/Root.tsx": "import React from 'react';\nimport {Composition, CalculateMetadataFunction} from 'remotion';\nimport {DonChito, Props} from './DonChito';\n\nconst calc: CalculateMetadataFunction<Props> = ({props}) => ({\n  durationInFrames: Math.max(30, props.scenes.reduce((a, s) => a + s.frames, 0)),\n  width: props.format === 'Short' ? 1080 : 1920,\n  height: props.format === 'Short' ? 1920 : 1080,\n});\n\nexport const RemotionRoot: React.FC = () => (\n  <Composition\n    id=\"DonChito\"\n    component={DonChito}\n    durationInFrames={300}\n    fps={30}\n    width={1920}\n    height={1080}\n    defaultProps={{format: 'Video largo', hook: '', badge: 'DON CHITO', outro: '', scenes: []} as Props}\n    calculateMetadata={calc}\n  />\n);\n",
+          "src/DonChito.tsx": "import React, {useMemo} from 'react';\nimport {AbsoluteFill, Img, Sequence, staticFile, useCurrentFrame, useVideoConfig, interpolate, Easing} from 'remotion';\n\nexport type Word = {t: number; w: string};\nexport type SceneP = {img: string; frames: number; text: string; words?: Word[] | null};\nexport type Props = {format: string; hook: string; badge: string; outro: string; scenes: SceneP[]};\n\nconst FONT = 'Montserrat, \"DejaVu Sans\", Arial, sans-serif';\nconst PAPER = '#f3e7cf';\nconst INK = '#2a1b10';\nconst YELLOW = '#ffd23f';\nconst RED = '#b23a26';\nconst clamp = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;\n\ntype Group = {start: number; end: number; words: Word[]};\n\nfunction groupsFor(s: SceneP, fps: number, vertical: boolean): Group[] {\n  const total = s.frames / fps;\n  let words: Word[] = (s.words || []).filter((x) => x && x.w);\n  if (!words.length) {\n    // Sin tiempos de palabra: se reparten según el largo de cada palabra.\n    const list = s.text.split(/\\s+/).filter(Boolean);\n    const chars = list.reduce((a, w) => a + w.length + 1, 0) || 1;\n    let acc = 0;\n    words = list.map((w) => {\n      const t = (acc / chars) * Math.max(0.5, total - 0.35);\n      acc += w.length + 1;\n      return {t, w};\n    });\n  }\n  const per = vertical ? 3 : 5;\n  const chunks: Word[][] = [];\n  for (let i = 0; i < words.length; i += per) chunks.push(words.slice(i, i + per));\n  if (chunks.length > 1 && chunks[chunks.length - 1].length === 1) chunks[chunks.length - 2].push(...chunks.pop()!);\n  return chunks.map((c, k) => ({start: c[0].t, end: k + 1 < chunks.length ? chunks[k + 1][0].t : total, words: c}));\n}\n\nconst Captions: React.FC<{s: SceneP; vertical: boolean}> = ({s, vertical}) => {\n  const frame = useCurrentFrame();\n  const {fps} = useVideoConfig();\n  const groups = useMemo(() => groupsFor(s, fps, vertical), [s, fps, vertical]);\n  const t = frame / fps;\n  const g = groups.find((x) => t >= x.start && t < x.end);\n  if (!g) return null;\n  const local = (t - g.start) * fps;\n  let current = 0;\n  g.words.forEach((w, i) => {\n    if (w.t <= t) current = i;\n  });\n  return (\n    <AbsoluteFill style={{justifyContent: 'flex-end', alignItems: 'center', paddingBottom: vertical ? 470 : 70}}>\n      <div\n        style={{\n          maxWidth: vertical ? 940 : 1640,\n          textAlign: 'center',\n          fontFamily: FONT,\n          fontWeight: 900,\n          fontSize: vertical ? 82 : 62,\n          lineHeight: 1.12,\n          color: 'white',\n          textTransform: 'uppercase',\n          WebkitTextStroke: (vertical ? 14 : 9) + 'px ' + INK,\n          paintOrder: 'stroke fill',\n          textShadow: '0 6px 0 rgba(0,0,0,0.35)',\n          scale: String(interpolate(local, [0, 4], [0.86, 1], {...clamp, easing: Easing.out(Easing.back(2))})),\n        }}\n      >\n        {g.words.map((w, i) => (\n          <span key={i} style={{color: i === current ? YELLOW : 'white', display: 'inline-block', margin: '0 0.18em', scale: i === current ? '1.08' : '1'}}>\n            {w.w}\n          </span>\n        ))}\n      </div>\n    </AbsoluteFill>\n  );\n};\n\nconst SceneView: React.FC<{s: SceneP; i: number; vertical: boolean}> = ({s, i, vertical}) => {\n  const frame = useCurrentFrame();\n  const zoomIn = i % 2 === 0;\n  const base = interpolate(frame, [0, s.frames], zoomIn ? [1.03, 1.13] : [1.13, 1.03], clamp);\n  // Pequeño \"golpe\" de entrada en cada corte para darle ritmo.\n  const pop = interpolate(frame, [0, 7], [0.05, 0], {...clamp, easing: Easing.out(Easing.cubic)});\n  const pan = i % 3 === 0 ? [-1.6, 1.6] : i % 3 === 1 ? [1.6, -1.6] : [0, 0];\n  const x = interpolate(frame, [0, s.frames], pan, clamp);\n  return (\n    <AbsoluteFill style={{backgroundColor: PAPER, overflow: 'hidden'}}>\n      <Img\n        src={staticFile(s.img)}\n        style={{\n          position: 'absolute',\n          inset: 0,\n          width: '100%',\n          height: '100%',\n          objectFit: 'cover',\n          objectPosition: '50% 46%',\n          scale: String(base + pop),\n          translate: `${x}% 0%`,\n        }}\n      />\n      <AbsoluteFill style={{background: 'radial-gradient(ellipse at center, rgba(0,0,0,0) 60%, rgba(60,35,15,0.28) 100%)'}} />\n      <Captions s={s} vertical={vertical} />\n    </AbsoluteFill>\n  );\n};\n\nconst Hook: React.FC<{text: string; vertical: boolean}> = ({text, vertical}) => {\n  const frame = useCurrentFrame();\n  const {fps} = useVideoConfig();\n  const inS = interpolate(frame, [0, 8], [0.6, 1], {...clamp, easing: Easing.out(Easing.back(2.2))});\n  const out = interpolate(frame, [2.3 * fps, 2.7 * fps], [1, 0], clamp);\n  return (\n    <AbsoluteFill style={{justifyContent: 'flex-start', alignItems: 'center', paddingTop: vertical ? 210 : 60, opacity: out}}>\n      <div\n        style={{\n          background: RED,\n          color: '#fff6e6',\n          fontFamily: FONT,\n          fontWeight: 900,\n          fontSize: vertical ? 84 : 62,\n          lineHeight: 1.05,\n          textTransform: 'uppercase',\n          padding: vertical ? '26px 40px' : '20px 44px',\n          borderRadius: 22,\n          border: `8px solid ${INK}`,\n          boxShadow: `0 12px 0 ${INK}`,\n          maxWidth: vertical ? 960 : 1300,\n          textAlign: 'center',\n          rotate: '-2deg',\n          scale: String(inS),\n        }}\n      >\n        {text}\n      </div>\n    </AbsoluteFill>\n  );\n};\n\nconst Badge: React.FC<{text: string; vertical: boolean}> = ({text, vertical}) => (\n  <AbsoluteFill style={{justifyContent: 'flex-start', alignItems: vertical ? 'center' : 'flex-start', padding: vertical ? '120px 0 0' : '34px 40px'}}>\n    <div\n      style={{\n        background: INK,\n        color: PAPER,\n        fontFamily: FONT,\n        fontWeight: 900,\n        letterSpacing: 3,\n        fontSize: vertical ? 40 : 30,\n        padding: '10px 22px',\n        borderRadius: 999,\n        opacity: 0.88,\n      }}\n    >\n      {text}\n    </div>\n  </AbsoluteFill>\n);\n\nconst Outro: React.FC<{text: string; vertical: boolean}> = ({text, vertical}) => {\n  const frame = useCurrentFrame();\n  const y = interpolate(frame, [0, 9], [80, 0], {...clamp, easing: Easing.out(Easing.cubic)});\n  return (\n    <AbsoluteFill style={{justifyContent: 'flex-start', alignItems: 'center', paddingTop: vertical ? 210 : 60}}>\n      <div\n        style={{\n          background: YELLOW,\n          color: INK,\n          fontFamily: FONT,\n          fontWeight: 900,\n          fontSize: vertical ? 70 : 60,\n          padding: '22px 40px',\n          borderRadius: 20,\n          border: `7px solid ${INK}`,\n          translate: `0px ${y}px`,\n          textAlign: 'center',\n          maxWidth: vertical ? 900 : 1400,\n        }}\n      >\n        {text}\n      </div>\n    </AbsoluteFill>\n  );\n};\n\nexport const DonChito: React.FC<Props> = (props) => {\n  const {fps, width, height, durationInFrames} = useVideoConfig();\n  const vertical = height > width;\n  let from = 0;\n  return (\n    <AbsoluteFill style={{backgroundColor: PAPER}}>\n      {props.scenes.map((s, i) => {\n        const at = from;\n        from += s.frames;\n        return (\n          <Sequence key={i} from={at} durationInFrames={s.frames}>\n            <SceneView s={s} i={i} vertical={vertical} />\n          </Sequence>\n        );\n      })}\n      {props.badge ? <Badge text={props.badge} vertical={vertical} /> : null}\n      {props.hook ? (\n        <Sequence from={0} durationInFrames={Math.round(2.7 * fps)}>\n          <Hook text={props.hook} vertical={vertical} />\n        </Sequence>\n      ) : null}\n      {props.outro ? (\n        <Sequence from={Math.max(0, durationInFrames - Math.round(2.4 * fps))}>\n          <Outro text={props.outro} vertical={vertical} />\n        </Sequence>\n      ) : null}\n    </AbsoluteFill>\n  );\n};\n"
+          };
+          const KIT_DIR = process.env.REMOTION_DIR || join(WORK, 'remotion-kit');
+
+          /** Instala Remotion la primera vez (solo cuando hay un video de Don Chito). */
+          function ensureRemotion() {
+            mkdirSync(join(KIT_DIR, 'src'), {recursive: true});
+            for (const [name, content] of Object.entries(KIT)) writeFileSync(join(KIT_DIR, name), content);
+            if (!existsSync(join(KIT_DIR, 'node_modules', '@remotion', 'cli'))) {
+              log('Instalando Remotion…');
+              execFileSync('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error'], {cwd: KIT_DIR, stdio: 'inherit', timeout: 600000});
+              execFileSync('npx', ['remotion', 'browser', 'ensure'], {cwd: KIT_DIR, stdio: 'inherit', timeout: 600000});
+            }
+            return KIT_DIR;
+          }
+
+          export async function renderRemotion(p) {
+            const FPS = 30;
+            const kit = ensureRemotion();
+            const pub = join(kit, 'public', p.id);
+            rmSync(pub, {recursive: true, force: true});
+            mkdirSync(pub, {recursive: true});
+            const work = join(WORK, p.id);
+            rmSync(work, {recursive: true, force: true});
+            mkdirSync(work, {recursive: true});
+            const scenes = [], durations = [], segs = [];
+            for (let i = 0; i < p.scenes.length; i++) {
+              const s = p.scenes[i];
+              if (!s.image || !s.audio || s.audio.text !== s.text) throw Error(`A la escena ${i + 1} le falta imagen o voz`);
+              const ext = s.image.type === 'image/png' ? 'png' : s.image.type === 'image/webp' ? 'webp' : 'jpg';
+              await download(s.image.url, join(pub, `img-${i}.${ext}`));
+              const aud = await download(s.audio.url, join(work, `aud-${i}.mp3`));
+              const dur = Math.min(30, Math.max(1.5, probe(aud) + 0.3));
+              const frames = Math.round(dur * FPS);
+              durations.push(Math.round((frames / FPS) * 100) / 100);
+              scenes.push({img: `${p.id}/img-${i}.${ext}`, frames, text: s.text, words: Array.isArray(s.audio.words) ? s.audio.words : null});
+              // Voz de la escena rellenada con silencio hasta su duración exacta.
+              const seg = join(work, `seg-${i}.wav`);
+              ff(['-i', aud, '-af', `aresample=48000,aformat=channel_layouts=stereo,apad,atrim=0:${(frames / FPS).toFixed(3)}`, '-c:a', 'pcm_s16le', seg]);
+              segs.push(seg);
+            }
+            const vertical = p.format === 'Short';
+            const props = {
+              format: p.format,
+              hook: String(p.coverTitle || p.title || '').toUpperCase().slice(0, vertical ? 40 : 55),
+              badge: 'DON CHITO',
+              outro: vertical ? '▶ Historia completa en el canal' : '',
+              scenes,
+            };
+            const propsFile = join(work, 'props.json');
+            writeFileSync(propsFile, JSON.stringify(props));
+            const silent = join(work, 'silent.mp4');
+            const t0 = Date.now();
+            execFileSync('npx', ['remotion', 'render', 'src/index.ts', 'DonChito', silent, `--props=${propsFile}`, '--muted', '--codec=h264', `--crf=${vertical ? 22 : 24}`, `--concurrency=${Math.max(1, cpus().length)}`, '--log=warn'],
+              {cwd: kit, stdio: 'inherit', timeout: 100 * 60000});
+            log(`Remotion terminó en ${Math.round((Date.now() - t0) / 60000)} min`);
+            // Pista de voz completa (normalizada) + video.
+            writeFileSync(join(work, 'segs.txt'), segs.map((f) => `file '${f}'`).join('\n'));
+            const voice = join(work, 'voice.m4a');
+            ff(['-f', 'concat', '-safe', '0', '-i', join(work, 'segs.txt'), '-af', 'loudnorm=I=-14:TP=-1.5:LRA=9,aresample=48000', '-c:a', 'aac', '-b:a', '160k', voice]);
+            let file = join(work, 'video.mp4');
+            ff(['-i', silent, '-i', voice, '-map', '0:v', '-map', '1:a', '-c:v', 'copy', '-c:a', 'copy', '-shortest', '-movflags', '+faststart', file]);
+            if (statSync(file).size > 90e6) {
+              const smaller = join(work, 'video-small.mp4');
+              ff(['-i', file, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '30', '-maxrate', '2000k', '-bufsize', '4M', '-c:a', 'copy', '-movflags', '+faststart', smaller]);
+              file = smaller;
+            }
+            rmSync(pub, {recursive: true, force: true});
+            return {file, durations};
           }
 
           // ---------- Armado del video con ffmpeg ----------
