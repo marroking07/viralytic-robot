@@ -127,7 +127,7 @@ jobs:
             mkdirSync(dir, {recursive: true});
             const py = join(dir, 'edge.py');
             if (!existsSync(py)) writeFileSync(py, EDGE_PY);
-            const text = p.scenes[i].text, voice = p.edgeVoice || 'es-MX-JorgeNeural';
+            const text = p.scenes[i].text, voice = p.channel === 'donchito' ? 'es-MX-JorgeNeural' : p.edgeVoice || 'es-MX-JorgeNeural';
             const out = join(dir, `${p.id}-${i}.mp3`), words = join(dir, `${p.id}-${i}.json`);
             let last;
             for (let attempt = 1; attempt <= 3; attempt++) {
@@ -252,14 +252,16 @@ jobs:
               if (!p.scenes[i].image) {
                 await step('image', `dibujando escena ${i + 1} de ${p.scenes.length}`, i + 1);
                 // Solo el fondo: a Don Chito lo dibuja Remotion con código encima.
-                const bg = String(p.scenes[i].visualPrompt || p.scenes[i].text).replace(/don chito('s)?/gi, 'the');
-                p = await api('ai-image', {id, index: i, prompt: bg + '. Background scene only, without Don Chito: no people, no humans, no stick figures. Keep the left third of the picture simple and mostly empty.', force: false});
+                const bg = String(p.scenes[i].visualPrompt || p.scenes[i].text).replace(/don chito('s)?/gi, 'the scene');
+                // Don Chito lo dibuja Remotion: aquí solo el lugar y los personajes de la historia (con su aspecto fijo del cast).
+                p = await api('ai-image', {id, index: i, prompt: bg + '. Without Don Chito (no stick figure ranchero, he is added later). Keep the left third of the picture simple and mostly empty.', force: false});
               }
               done++;
               const a = p.scenes[i].audio;
               if (!a || a.text !== p.scenes[i].text || !String(a.voice || '').startsWith('Edge · ')) {
                 await step('voice', `voz ${i + 1} de ${p.scenes.length}`, i + 1);
-                p = await edgeVoice(p, i, {rate: '+4%', pitch: '-2Hz'});
+                // Siempre la misma voz y el mismo tono: Jorge (México), un poco pausado para que se entienda cada palabra.
+                p = await edgeVoice(p, i, {rate: '-5%', pitch: '-2Hz'});
               }
               done++;
               if (i % 5 === 4 || i === p.scenes.length - 1) log(`Escenas ${i + 1}/${p.scenes.length} listas`);
@@ -362,7 +364,7 @@ jobs:
             const props = {
               format: p.format,
               hook: String(p.coverTitle || p.title || '').toUpperCase().slice(0, vertical ? 40 : 55),
-              badge: 'DON CHITO',
+              badge: '', // sin letrero con el nombre en las imágenes (pedido de Luis)
               outro: vertical ? '▶ Historia completa en el canal' : '',
               scenes,
             };
