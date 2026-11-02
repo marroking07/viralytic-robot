@@ -209,7 +209,7 @@ jobs:
               done++;
               log(`Escena ${i + 1}/${p.scenes.length} lista`);
             }
-            if (!p.thumbnailImage) {
+            if (!p.thumbnailImage && !codeBg) {
               await step('thumbnail', 'creando la portada');
               p = await api('ai-thumbnail', {id, title: p.coverTitle || p.title, prompt: p.coverPrompt || ''});
             }
@@ -234,6 +234,282 @@ jobs:
             return result;
           }
 
+          // ---------- Fondos dibujados con código (estilo bolitas y palitos, igual que Don Chito) ----------
+          // sceneSVG(set, cast, {w, h}) devuelve un SVG completo. Gratis, sin cuotas y siempre con el mismo estilo.
+          // set = {lugar, hora, cosas:[], personajes:[{name, pose}]}; cast = [{name, kind, color, hat}]
+          const BG_LUGARES = ['rancho', 'arroyo', 'fogata', 'panteon', 'milpa', 'camino', 'cerro', 'pozo', 'hacienda', 'cocina', 'capilla', 'rio', 'monte', 'corral', 'pueblo'];
+          const BG_HORAS = ['noche', 'atardecer', 'dia', 'amanecer'];
+          const BG_COSAS = ['luna', 'estrellas', 'niebla', 'linterna', 'veladora', 'fogata', 'perro', 'caballo', 'vaca', 'gallina', 'lechuza', 'arbol', 'nopal', 'cruz', 'piedra', 'carreta', 'ventana', 'lluvia', 'huellas'];
+          const BG_TIPOS = ['hombre', 'mujer', 'nino', 'nina', 'anciano', 'anciana', 'llorona', 'charro_negro', 'sombra', 'nahual', 'jinete_sin_cabeza', 'fantasma', 'curandera'];
+          const BG_POSES = ['parado', 'camina', 'asustado', 'senala', 'llora', 'flota', 'corre', 'sentado', 'reza'];
+
+          const INK = '#1f150d';
+          const COLORS = {rojo: '#c0392b', azul: '#2f6db5', verde: '#3f8f4f', amarillo: '#e9b949', blanco: '#f4f1ea', negro: '#1b1b1b', cafe: '#8a5a2b', morado: '#7b4ea3', rosa: '#d9789a', gris: '#8d8d8d', naranja: '#e07b2e'};
+          const col = (c, d) => COLORS[String(c || '').toLowerCase()] || (/^#[0-9a-f]{6}$/i.test(String(c)) ? c : d);
+
+          function hash(s) {
+            let h = 2166136261;
+            for (const ch of String(s)) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
+            return h >>> 0;
+          }
+          function rng(seed) {
+            let a = seed || 1;
+            return () => ((a = Math.imul(a ^ (a >>> 15), a | 1) ^ (a + Math.imul(a ^ (a >>> 7), a | 61))), ((a ^ (a >>> 14)) >>> 0) / 4294967296);
+          }
+
+          const SKY = {
+            noche: ['#141033', '#2b1f57', '#4a2f6e'],
+            atardecer: ['#3a2a6e', '#c4566b', '#f2a65a'],
+            dia: ['#8fd3f4', '#bfe6f7', '#f3ecd3'],
+            amanecer: ['#4b5d9c', '#e79a7b', '#f7d7a0'],
+          };
+          const GROUND = {noche: ['#2d2347', '#211a37'], atardecer: ['#7a4a52', '#5a3542'], dia: ['#d9b77a', '#c99f5f'], amanecer: ['#a87a6a', '#8a5f55']};
+
+          // ---------- piezas ----------
+          const nopal = (x, y, s, c) => `<g transform="translate(${x} ${y}) scale(${s})" fill="${c}" stroke="${INK}" stroke-width="4"><ellipse cx="0" cy="-60" rx="22" ry="36"/><ellipse cx="-26" cy="-108" rx="16" ry="26" transform="rotate(-25 -26 -108)"/><ellipse cx="24" cy="-112" rx="15" ry="24" transform="rotate(20 24 -112)"/><ellipse cx="0" cy="-130" rx="14" ry="22"/></g>`;
+          const tree = (x, y, s, c, leaf) => `<g transform="translate(${x} ${y}) scale(${s})" stroke="${INK}" stroke-width="5" stroke-linecap="round"><path d="M0,0 L0,-120 M0,-80 L-40,-130 M0,-95 L38,-140 M-20,-105 L-45,-115" fill="none" stroke="${c}"/><path d="M0,0 L0,-120 M0,-80 L-40,-130 M0,-95 L38,-140" fill="none" stroke="${INK}" stroke-width="2"/>${leaf ? `<ellipse cx="-30" cy="-140" rx="40" ry="22" fill="${leaf}"/><ellipse cx="30" cy="-150" rx="42" ry="24" fill="${leaf}"/><ellipse cx="0" cy="-165" rx="38" ry="22" fill="${leaf}"/>` : ''}</g>`;
+          const adobe = (x, y, s, wall, glow) => `<g transform="translate(${x} ${y}) scale(${s})" stroke="${INK}" stroke-width="5" stroke-linejoin="round"><rect x="0" y="-150" width="260" height="150" fill="${wall}"/><rect x="-14" y="-168" width="288" height="22" fill="#9a6b44"/><rect x="104" y="-92" width="52" height="92" fill="#5b3a22"/><rect x="28" y="-110" width="44" height="40" fill="${glow ? '#ffbf55' : '#3c2a3a'}"/><rect x="188" y="-110" width="44" height="40" fill="${glow ? '#ffbf55' : '#3c2a3a'}"/>${[20, 70, 120, 170, 220].map((v) => `<circle cx="${v}" cy="-157" r="5" fill="#5b3a22"/>`).join('')}</g>`;
+          const fence = (x1, x2, y, c) => {
+            let g = `<g stroke="${INK}" stroke-width="5" stroke-linecap="round"><path d="M${x1},${y - 45} L${x2},${y - 45} M${x1},${y - 20} L${x2},${y - 20}" stroke="${c}" stroke-width="9"/>`;
+            for (let x = x1; x <= x2; x += 70) g += `<rect x="${x - 7}" y="${y - 70}" width="14" height="72" fill="${c}"/>`;
+            return g + '</g>';
+          };
+          const campfire = (x, y, s) => `<g transform="translate(${x} ${y}) scale(${s})" stroke="${INK}" stroke-width="5" stroke-linejoin="round"><circle cx="0" cy="-40" r="90" fill="#ffb347" opacity="0.18" stroke="none"/><path d="M-50,0 L50,-18 M-50,-18 L50,0" stroke="#7a4a24" stroke-width="16"/><path d="M-30,-10 C-38,-50 -8,-60 -4,-96 C14,-66 34,-56 30,-10 Z" fill="#f28b2c"/><path d="M-12,-10 C-16,-36 2,-44 4,-66 C14,-46 22,-36 16,-10 Z" fill="#ffd166" stroke-width="3"/></g>`;
+          const cross = (x, y, s, c) => `<g transform="translate(${x} ${y}) scale(${s})" fill="${c}" stroke="${INK}" stroke-width="4"><rect x="-7" y="-80" width="14" height="80"/><rect x="-28" y="-62" width="56" height="13"/></g>`;
+          const tomb = (x, y, s) => `<g transform="translate(${x} ${y}) scale(${s})" fill="#8d8a9c" stroke="${INK}" stroke-width="4"><path d="M-30,0 L-30,-55 Q0,-85 30,-55 L30,0 Z"/></g>`;
+          const well = (x, y, s) => `<g transform="translate(${x} ${y}) scale(${s})" stroke="${INK}" stroke-width="5"><rect x="-60" y="-60" width="120" height="60" fill="#9a8f84"/><path d="M-60,-40 L60,-40 M-20,-60 L-20,0 M25,-60 L25,0" stroke="#6f655c" stroke-width="3"/><path d="M-50,-60 L-50,-150 M50,-60 L50,-150 M-62,-150 L62,-150" stroke="#7a4a24" stroke-width="10" fill="none"/><path d="M0,-150 L0,-100" stroke="${INK}"/><rect x="-12" y="-102" width="24" height="22" fill="#7a4a24"/></g>`;
+          const corn = (x, y, s) => `<g transform="translate(${x} ${y}) scale(${s})" stroke="${INK}" stroke-width="4" stroke-linecap="round"><path d="M0,0 L0,-150" stroke="#5f8f3a" stroke-width="7"/><path d="M0,-40 Q-40,-70 -55,-55 M0,-70 Q40,-100 55,-85 M0,-100 Q-35,-130 -48,-118 M0,-130 Q30,-160 40,-150" fill="none" stroke="#6fa543" stroke-width="7"/><ellipse cx="10" cy="-85" rx="8" ry="20" fill="#e9c46a"/></g>`;
+          const chapel = (x, y, s, glow) => `<g transform="translate(${x} ${y}) scale(${s})" stroke="${INK}" stroke-width="5" stroke-linejoin="round"><rect x="-90" y="-170" width="180" height="170" fill="#e8d9bf"/><path d="M-90,-170 L0,-240 L90,-170 Z" fill="#c9a77a"/><rect x="-22" y="-300" width="44" height="70" fill="#e8d9bf"/><path d="M0,-345 L0,-300 M-15,-330 L15,-330" stroke-width="7"/><path d="M-30,0 L-30,-80 Q0,-115 30,-80 L30,0 Z" fill="#5b3a22"/><circle cx="0" cy="-200" r="16" fill="${glow ? '#ffbf55' : '#3c2a3a'}"/></g>`;
+          const hacienda = (x, y, s, glow) => `<g transform="translate(${x} ${y}) scale(${s})" stroke="${INK}" stroke-width="5" stroke-linejoin="round"><rect x="0" y="-200" width="420" height="200" fill="#d9b48a"/><rect x="-16" y="-220" width="452" height="26" fill="#a0523d"/>${[30, 120, 300, 370].map((v) => `<rect x="${v}" y="-150" width="40" height="56" fill="${glow ? '#ffbf55' : '#3c2a3a'}"/>`).join('')}<path d="M170,0 L170,-110 Q210,-160 250,-110 L250,0 Z" fill="#5b3a22"/></g>`;
+          const cart = (x, y, s) => `<g transform="translate(${x} ${y}) scale(${s})" stroke="${INK}" stroke-width="5"><rect x="-90" y="-80" width="180" height="40" fill="#9a6b44"/><circle cx="-50" cy="-30" r="30" fill="none" stroke-width="7"/><circle cx="50" cy="-30" r="30" fill="none" stroke-width="7"/><path d="M-50,-30 L-50,-60 M50,-30 L50,-60 M90,-60 L150,-40" stroke-width="5"/></g>`;
+          const rock = (x, y, s) => `<g transform="translate(${x} ${y}) scale(${s})" stroke="${INK}" stroke-width="4"><path d="M-40,0 Q-45,-30 -10,-38 Q30,-45 40,-15 L42,0 Z" fill="#8a8173"/></g>`;
+          const lantern = (x, y, s) => `<g transform="translate(${x} ${y}) scale(${s})" stroke="${INK}" stroke-width="4"><circle cx="0" cy="-30" r="60" fill="#ffbf55" opacity="0.22" stroke="none"/><path d="M-14,0 L-14,-46 L14,-46 L14,0 Z" fill="#ffd27a"/><path d="M-18,-46 L18,-46 L0,-62 Z M-6,-62 Q0,-76 6,-62" fill="#3c2a3a"/></g>`;
+          const candle = (x, y, s) => `<g transform="translate(${x} ${y}) scale(${s})" stroke="${INK}" stroke-width="3"><circle cx="0" cy="-40" r="34" fill="#ffbf55" opacity="0.25" stroke="none"/><rect x="-9" y="-36" width="18" height="36" fill="#f4f1ea"/><path d="M0,-36 C-8,-50 0,-60 0,-66 C6,-56 8,-48 0,-36 Z" fill="#ffb347"/></g>`;
+          const owl = (x, y, s) => `<g transform="translate(${x} ${y}) scale(${s})" stroke="${INK}" stroke-width="4"><ellipse cx="0" cy="-30" rx="24" ry="32" fill="#9a8f84"/><path d="M-22,-56 L-14,-70 L-6,-58 M22,-56 L14,-70 L6,-58" fill="#9a8f84"/><circle cx="-9" cy="-42" r="8" fill="#ffd166"/><circle cx="9" cy="-42" r="8" fill="#ffd166"/><circle cx="-9" cy="-42" r="3" fill="${INK}"/><circle cx="9" cy="-42" r="3" fill="${INK}"/><path d="M-4,-32 L0,-26 L4,-32" fill="#e9b949"/></g>`;
+          const dog = (x, y, s, c, eyes) => `<g transform="translate(${x} ${y}) scale(${s})" stroke="${INK}" stroke-width="4" stroke-linecap="round"><ellipse cx="0" cy="-45" rx="45" ry="20" fill="${c}"/><circle cx="48" cy="-62" r="17" fill="${c}"/><path d="M58,-74 L64,-90 L52,-78" fill="${c}"/><path d="M-30,-30 L-34,0 M-10,-30 L-12,0 M20,-30 L22,0 M36,-30 L40,0 M-44,-50 L-66,-66" fill="none" stroke-width="6"/><circle cx="54" cy="-64" r="3.5" fill="${eyes || INK}" stroke="none"/></g>`;
+          const horse = (x, y, s, c, eyes) => `<g transform="translate(${x} ${y}) scale(${s})" stroke="${INK}" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="0" cy="-90" rx="70" ry="32" fill="${c}"/><path d="M55,-105 L90,-160 L118,-150 L84,-96 Z" fill="${c}"/><path d="M-45,-70 L-50,0 M-20,-65 L-22,0 M25,-65 L28,0 M50,-70 L56,0 M-70,-95 Q-100,-70 -92,-40" fill="none" stroke-width="8"/><path d="M80,-158 L74,-176 L90,-162" fill="${c}"/><circle cx="104" cy="-150" r="4" fill="${eyes || INK}" stroke="none"/></g>`;
+          const cow = (x, y, s) => `<g transform="translate(${x} ${y}) scale(${s})" stroke="${INK}" stroke-width="5" stroke-linecap="round"><ellipse cx="0" cy="-80" rx="70" ry="34" fill="#f4f1ea"/><ellipse cx="-20" cy="-88" rx="18" ry="12" fill="${INK}"/><circle cx="76" cy="-96" r="26" fill="#f4f1ea"/><path d="M62,-120 L56,-134 M90,-120 L96,-134" stroke-width="6"/><path d="M-45,-55 L-48,0 M-15,-50 L-15,0 M20,-50 L22,0 M45,-55 L48,0" stroke-width="8"/><circle cx="84" cy="-98" r="3.5" fill="${INK}" stroke="none"/></g>`;
+          const hen = (x, y, s) => `<g transform="translate(${x} ${y}) scale(${s})" stroke="${INK}" stroke-width="4"><ellipse cx="0" cy="-30" rx="26" ry="22" fill="#f4f1ea"/><circle cx="22" cy="-52" r="12" fill="#f4f1ea"/><path d="M18,-64 Q22,-74 28,-64" fill="${COLORS.rojo}"/><path d="M33,-52 L42,-48 L33,-45" fill="#e9b949"/><path d="M-6,-8 L-8,4 M8,-8 L10,4"/></g>`;
+
+          // ---------- personajes (monitos de palito, como Don Chito) ----------
+          function person(c, pose, x, y, s, t) {
+            const kind = c.kind || 'hombre';
+            const cloth = col(c.color, kind === 'mujer' || kind === 'nina' ? COLORS.rosa : COLORS.azul);
+            const scared = pose === 'asustado' || pose === 'corre';
+            const sw = 9;
+            // brazos según la pose
+            const arms = {
+              parado: 'M0,-120 L-26,-80 L-30,-40 M0,-120 L26,-80 L30,-40',
+              camina: 'M0,-120 L-24,-82 L-40,-56 M0,-120 L22,-84 L36,-52',
+              asustado: 'M0,-120 L-36,-150 L-44,-190 M0,-120 L36,-150 L44,-190',
+              senala: 'M0,-120 L-26,-80 L-30,-40 M0,-120 L40,-128 L86,-140',
+              llora: 'M0,-120 L-16,-150 L-10,-176 M0,-120 L16,-150 L10,-176',
+              flota: 'M0,-120 L-40,-100 L-70,-110 M0,-120 L40,-100 L70,-110',
+              corre: 'M0,-120 L-34,-100 L-56,-120 M0,-120 L30,-90 L52,-70',
+              sentado: 'M0,-110 L-26,-80 L-20,-56 M0,-110 L26,-80 L20,-56',
+              reza: 'M0,-120 L-20,-100 L0,-130 M0,-120 L20,-100 L0,-130',
+            }[pose] || 'M0,-120 L-26,-80 L-30,-40 M0,-120 L26,-80 L30,-40';
+            const legs = pose === 'sentado' ? 'M0,-56 L-30,-50 L-34,-6 M0,-56 L30,-50 L34,-6' : pose === 'camina' || pose === 'corre' ? 'M0,-56 L-30,0 M0,-56 L30,0' : 'M0,-56 L-20,0 M0,-56 L20,0';
+            const female = ['mujer', 'nina', 'anciana', 'llorona', 'curandera'].includes(kind);
+            const small = kind === 'nino' || kind === 'nina' ? 0.75 : 1;
+            const headY = -170, R = 36;
+            let body = '', head = '', extra = '';
+            const eyes = (dx = 13, r = 5, fill = INK) => `<circle cx="${-dx}" cy="${headY}" r="${r}" fill="${fill}"/><circle cx="${dx}" cy="${headY}" r="${r}" fill="${fill}"/>`;
+            const mouth = scared ? `<ellipse cx="0" cy="${headY + 18}" rx="7" ry="9" fill="#6b1d14" stroke="${INK}" stroke-width="3"/>` : pose === 'llora' ? `<path d="M-10,${headY + 22} Q0,${headY + 12} 10,${headY + 22}" fill="none" stroke="${INK}" stroke-width="4"/>` : `<path d="M-10,${headY + 14} Q0,${headY + 24} 10,${headY + 14}" fill="none" stroke="${INK}" stroke-width="4"/>`;
+
+            if (kind === 'llorona' || kind === 'fantasma') {
+              // Mujer de vestido blanco largo, velo y pelo negro largo; flota, se ve un poco transparente.
+              const fl = Math.sin(t / 7) * 6;
+              return `<g transform="translate(${x} ${y - 40 + fl}) scale(${s})" opacity="0.92" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="0" cy="-90" rx="105" ry="140" fill="#dfe8ff" opacity="0.16"/>
+          <path d="M-34,${headY} C-48,${headY + 70} -46,${headY + 130} -30,${headY + 150} L30,${headY + 150} C46,${headY + 130} 48,${headY + 70} 34,${headY} Z" fill="#141018"/>
+          <path d="M0,-135 C-40,-110 -60,-40 -70,10 Q-50,0 -35,14 Q-18,0 0,14 Q18,0 35,14 Q50,0 70,10 C60,-40 40,-110 0,-135 Z" fill="#f4f6ff" stroke="${INK}" stroke-width="6"/>
+          <path d="${arms}" fill="none" stroke="${INK}" stroke-width="${sw}"/>
+          <circle cx="0" cy="${headY}" r="${R}" fill="#f4f6ff" stroke="${INK}" stroke-width="7"/>
+          <path d="M-30,${headY - 22} Q0,${headY - 44} 30,${headY - 22} Q12,${headY - 30} 0,${headY - 16} Q-12,${headY - 30} -30,${headY - 22} Z" fill="#141018"/>
+          <path d="M-40,${headY - 6} Q0,${headY - 60} 40,${headY - 6} L46,${headY + 66} Q0,${headY + 50} -46,${headY + 66} Z" fill="#ffffff" opacity="0.45" stroke="${INK}" stroke-width="3"/>
+          ${kind === 'llorona' ? `<path d="M-12,${headY + 8} L-14,${headY + 24} M12,${headY + 8} L14,${headY + 24}" stroke="#7fb3ff" stroke-width="4"/><path d="M-9,${headY + 22} Q0,${headY + 14} 9,${headY + 22}" stroke="${INK}" stroke-width="4" fill="none"/>` : ''}
+          ${eyes(12, 4)}</g>`;
+            }
+            if (kind === 'sombra') {
+              return `<g transform="translate(${x} ${y}) scale(${s})" stroke-linecap="round"><path d="M0,-56 L-20,0 M0,-56 L20,0 M0,-140 L0,-56 ${arms}" stroke="#0b0812" stroke-width="16" fill="none"/><circle cx="0" cy="${headY}" r="${R + 4}" fill="#0b0812"/><circle cx="-13" cy="${headY}" r="6" fill="#ff3b30"/><circle cx="13" cy="${headY}" r="6" fill="#ff3b30"/></g>`;
+            }
+            if (kind === 'nahual') return dog(x, y, s * 1.6, '#151018', '#ff3b30');
+            if (kind === 'jinete_sin_cabeza') {
+              return `<g>${horse(x, y, s * 1.2, '#2a2230', '#ff3b30')}<g transform="translate(${x} ${y - 125 * s}) scale(${s})" stroke="${INK}" stroke-linecap="round"><path d="M0,-40 L0,40 M0,-30 L-30,10 M0,-30 L34,0" stroke-width="${sw}" fill="none"/><path d="M-26,-50 L26,-50 L18,-30 L-18,-30 Z" fill="#3a2f45" stroke-width="5"/></g></g>`;
+            }
+            const charro = kind === 'charro_negro';
+            if (female) body = `<path d="M0,-130 L-38,-30 L38,-30 Z" fill="${kind === 'llorona' ? '#f4f6ff' : cloth}" stroke="${INK}" stroke-width="6"/>`;
+            else body = `<path d="M-20,-122 L20,-122 L16,-70 L-16,-70 Z" fill="${charro ? '#151018' : cloth}" stroke="${INK}" stroke-width="5"/>`;
+            head = `<circle cx="0" cy="${headY}" r="${R}" fill="white" stroke="${INK}" stroke-width="7"/>` + (charro ? eyes(13, 6, '#ff3b30') : eyes()) + mouth;
+            if (kind === 'anciano' || kind === 'anciana') head += `<path d="M-24,${headY - 18} L-8,${headY - 14} M8,${headY - 14} L24,${headY - 18}" stroke="${INK}" stroke-width="4"/>`;
+            if (!female && kind !== 'nino') head += `<path d="M0,${headY + 10} C-8,${headY + 2} -24,${headY + 4} -28,${headY + 14} C-24,${headY + 20} -12,${headY + 14} 0,${headY + 16} C12,${headY + 14} 24,${headY + 20} 28,${headY + 14} C24,${headY + 4} 8,${headY + 2} 0,${headY + 10} Z" fill="${kind === 'anciano' ? '#cfcfcf' : INK}"/>`;
+            const hat = c.hat || (charro ? 'sombrero' : female ? (kind === 'anciana' || kind === 'curandera' ? 'rebozo' : 'trenzas') : kind === 'nino' ? 'ninguno' : 'sombrero');
+            if (hat === 'sombrero') {
+              const hc = charro ? '#151018' : '#e9c46a';
+              extra = `<path d="M-30,${headY - 30} C-32,${headY - 70} -16,${headY - 84} 0,${headY - 84} C16,${headY - 84} 32,${headY - 70} 30,${headY - 30} Z" fill="${hc}" stroke="${INK}" stroke-width="6"/><ellipse cx="0" cy="${headY - 28}" rx="${charro ? 90 : 78}" ry="13" fill="${hc}" stroke="${INK}" stroke-width="6"/>${charro ? `<path d="M-60,${headY - 26} Q0,${headY - 16} 60,${headY - 26}" stroke="#c9a227" stroke-width="4" fill="none"/>` : ''}`;
+            } else if (hat === 'gorra') extra = `<path d="M-34,${headY - 12} Q0,${headY - 60} 34,${headY - 12} Z" fill="${cloth}" stroke="${INK}" stroke-width="5"/><path d="M20,${headY - 14} L58,${headY - 10}" stroke="${INK}" stroke-width="7"/>`;
+            else if (hat === 'rebozo') extra = `<path d="M-40,${headY + 6} Q-46,${headY - 50} 0,${headY - 48} Q46,${headY - 50} 40,${headY + 6} L46,${headY + 70} L30,${headY + 20} Q0,${headY - 30} -30,${headY + 20} L-46,${headY + 70} Z" fill="${col(c.color, '#5d4a7a')}" stroke="${INK}" stroke-width="5"/>`;
+            else if (hat === 'trenzas') extra = `<path d="M-34,${headY - 10} Q0,${headY - 56} 34,${headY - 10}" fill="${INK}"/><path d="M-34,${headY} Q-46,${headY + 40} -36,${headY + 70} M34,${headY} Q46,${headY + 40} 36,${headY + 70}" stroke="${INK}" stroke-width="10" fill="none"/>`;
+            const sit = pose === 'sentado' ? 50 : 0;
+            return `<g transform="translate(${x} ${y + sit * s}) scale(${s * small})" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="0" cy="4" rx="44" ry="8" fill="rgba(0,0,0,0.25)"/>
+          <path d="${legs}" fill="none" stroke="${INK}" stroke-width="${sw}"/>
+          <line x1="0" y1="-134" x2="0" y2="-56" stroke="${INK}" stroke-width="${sw}"/>
+          ${body}<path d="${arms}" fill="none" stroke="${INK}" stroke-width="${sw}"/>
+          ${hat === 'rebozo' ? extra + head : head + extra}
+          ${charro ? '' : `<path d="M-14,-136 L14,-136 L0,-118 Z" fill="${col(c.color, COLORS.rojo)}" stroke="${INK}" stroke-width="3"/>`}
+          </g>`;
+          }
+
+          /** Dibuja el fondo completo de una escena. t = número de escena (varía un poco la composición). */
+          function sceneSVG(set = {}, cast = [], {w = 1920, h = 1080, t = 0, horror = false} = {}) {
+            const lugar = BG_LUGARES.includes(set.lugar) ? set.lugar : 'rancho';
+            const hora = BG_HORAS.includes(set.hora) ? set.hora : horror ? 'noche' : 'dia';
+            const cosas = new Set((Array.isArray(set.cosas) ? set.cosas : []).filter((c) => BG_COSAS.includes(c)));
+            if (hora === 'noche') {
+              cosas.add('luna');
+              cosas.add('estrellas');
+            }
+            const r = rng(hash(lugar + hora + t));
+            const vertical = h > w;
+            // Todo se dibuja en un lienzo de 1920x1080 y se ajusta; en vertical se dibuja más alto.
+            const W = vertical ? 1080 : 1920, H = vertical ? 1920 : 1080;
+            const gy = vertical ? 1380 : 820; // línea del suelo
+            const [s1, s2, s3] = SKY[hora];
+            const [g1, g2] = GROUND[hora];
+            const night = hora === 'noche';
+            const glow = night || hora === 'atardecer';
+            let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><defs><linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${s1}"/><stop offset="0.6" stop-color="${s2}"/><stop offset="1" stop-color="${s3}"/></linearGradient></defs>`;
+            svg += `<rect width="${W}" height="${H}" fill="url(#sky)"/>`;
+            if (cosas.has('estrellas')) for (let i = 0; i < 60; i++) svg += `<circle cx="${(r() * W) | 0}" cy="${(r() * gy * 0.6) | 0}" r="${(1.5 + r() * 2.5).toFixed(1)}" fill="#fff" opacity="${(0.4 + r() * 0.5).toFixed(2)}"/>`;
+            const mx = W * (0.62 + r() * 0.25), my = gy * 0.2;
+            if (cosas.has('luna')) svg += `<circle cx="${mx}" cy="${my}" r="${W * 0.1}" fill="#fff4d6" opacity="0.12"/><circle cx="${mx}" cy="${my}" r="${W * 0.055}" fill="#fff4d6" stroke="${INK}" stroke-width="5"/><circle cx="${mx - 20}" cy="${my - 10}" r="12" fill="#efe1b8"/><circle cx="${mx + 25}" cy="${my + 20}" r="8" fill="#efe1b8"/>`;
+            else if (hora === 'dia') svg += `<circle cx="${mx}" cy="${my}" r="${W * 0.05}" fill="#ffd166" stroke="${INK}" stroke-width="5"/>`;
+            else svg += `<circle cx="${mx}" cy="${gy - 40}" r="${W * 0.06}" fill="#ffb347" stroke="${INK}" stroke-width="5" opacity="0.9"/>`;
+            // cerros
+            svg += `<path d="M0,${gy - 120} Q${W * 0.2},${gy - 260} ${W * 0.42},${gy - 140} T${W * 0.85},${gy - 170} T${W},${gy - 120} L${W},${gy} L0,${gy} Z" fill="${night ? '#3a2b5c' : hora === 'dia' ? '#b8a07a' : '#6e4a6a'}" stroke="${INK}" stroke-width="4"/>`;
+            svg += `<path d="M0,${gy - 40} Q${W * 0.3},${gy - 110} ${W * 0.6},${gy - 50} T${W},${gy - 60} L${W},${gy} L0,${gy} Z" fill="${night ? '#30244d' : hora === 'dia' ? '#c9ae7f' : '#5e3f5e'}" stroke="${INK}" stroke-width="4"/>`;
+            // suelo
+            svg += `<rect x="0" y="${gy}" width="${W}" height="${H - gy}" fill="${g1}"/><path d="M0,${gy + (H - gy) * 0.45} Q${W / 2},${gy + (H - gy) * 0.3} ${W},${gy + (H - gy) * 0.5} L${W},${H} L0,${H} Z" fill="${g2}"/><line x1="0" y1="${gy}" x2="${W}" y2="${gy}" stroke="${INK}" stroke-width="5"/>`;
+
+            // Lugar (lo importante va del centro a la derecha; el tercio izquierdo queda para Don Chito)
+            const R = (a, b) => a + r() * (b - a);
+            const cx = vertical ? W * 0.5 : W * 0.62;
+            const sc = vertical ? 0.95 : 1;
+            const plant = night ? '#2c4a3a' : '#5f9a4a';
+            switch (lugar) {
+              case 'arroyo':
+              case 'rio': {
+                const water = lugar === 'rio' || cosas.has('lluvia');
+                svg += `<path d="M${W * 0.3},${H} C${W * 0.45},${gy + 140} ${W * 0.55},${gy + 60} ${W},${gy + 30} L${W},${gy + 110} C${W * 0.7},${gy + 150} ${W * 0.6},${gy + 240} ${W * 0.55},${H} Z" fill="${water ? (night ? '#3d6aa8' : '#6fb3e0') : night ? '#4a3c5c' : '#e3c992'}" stroke="${INK}" stroke-width="5"/>`;
+                if (!water) for (let i = 0; i < 8; i++) svg += `<path d="M${R(W * 0.45, W * 0.95)},${R(gy + 50, gy + 200)} l${R(-30, 30)},${R(10, 30)}" stroke="${INK}" stroke-width="3" opacity="0.6"/>`;
+                svg += tree(W * 0.86, gy + 30, 1.3 * sc, '#5b3a22', plant) + rock(W * 0.7, gy + 120, 1.2) + nopal(W * 0.95, gy + 60, 0.9, plant);
+                break;
+              }
+              case 'fogata':
+                svg += campfire(cx, gy + 150, 1.7 * sc) + rock(cx - 160, gy + 150, 0.9) + nopal(W * 0.93, gy + 40, 1, plant) + adobe(W * 0.8, gy + 10, 0.9 * sc, '#c98f5e', glow);
+                break;
+              case 'panteon':
+                for (let i = 0; i < 6; i++) svg += i % 2 ? cross(R(W * 0.42, W * 0.97), gy + R(30, 160), R(0.9, 1.4), '#8d8a9c') : tomb(R(W * 0.42, W * 0.97), gy + R(30, 160), R(0.9, 1.3));
+                svg += tree(W * 0.9, gy + 20, 1.5 * sc, '#3c2a3a', null) + candle(W * 0.62, gy + 170, 1.1);
+                break;
+              case 'milpa':
+                for (let i = 0; i < 14; i++) svg += corn(W * (0.4 + i * 0.045), gy + 40 + (i % 3) * 30, 1.1 * sc);
+                break;
+              case 'camino':
+                svg += `<path d="M${W * 0.42},${H} L${W * 0.62},${gy} L${W * 0.68},${gy} L${W * 0.95},${H} Z" fill="${night ? '#5a4a6a' : '#e0c690'}" stroke="${INK}" stroke-width="5"/>` + tree(W * 0.9, gy + 20, 1.2, '#5b3a22', plant) + nopal(W * 0.45, gy + 30, 0.9, plant);
+                break;
+              case 'cerro':
+              case 'monte':
+                svg += tree(W * 0.55, gy + 30, 1.4, '#5b3a22', plant) + tree(W * 0.75, gy + 10, 1.1, '#5b3a22', plant) + tree(W * 0.92, gy + 40, 1.5, '#5b3a22', plant) + rock(W * 0.66, gy + 140, 1.4) + nopal(W * 0.45, gy + 80, 1.1, plant);
+                break;
+              case 'pozo':
+                svg += well(cx + 60, gy + 120, 1.3 * sc) + tree(W * 0.9, gy + 20, 1.3, '#5b3a22', plant) + rock(cx - 120, gy + 140, 0.8);
+                break;
+              case 'hacienda':
+                svg += hacienda(W * (vertical ? 0.25 : 0.5), gy + 30, 1.2 * sc, glow) + nopal(W * 0.95, gy + 70, 1, plant);
+                break;
+              case 'capilla':
+                svg += chapel(cx + 80, gy + 30, 1.1 * sc, glow) + cross(W * 0.93, gy + 120, 1.2, '#8d8a9c') + candle(cx - 80, gy + 160, 1.2);
+                break;
+              case 'cocina': {
+                svg = svg.replace(/<rect width="\d+" height="\d+" fill="url\(#sky\)"\/>/, '');
+                svg += `<rect width="${W}" height="${H}" fill="${glow ? '#5a3a33' : '#d9b48a'}"/><rect x="0" y="${gy}" width="${W}" height="${H - gy}" fill="${glow ? '#3a2622' : '#a0764f'}"/><line x1="0" y1="${gy}" x2="${W}" y2="${gy}" stroke="${INK}" stroke-width="5"/>`;
+                svg += `<rect x="${W * 0.72}" y="${gy - 360}" width="220" height="160" fill="${night ? '#1d1840' : '#9fd6f2'}" stroke="${INK}" stroke-width="8"/><path d="M${W * 0.72 + 110},${gy - 360} L${W * 0.72 + 110},${gy - 200}" stroke="${INK}" stroke-width="6"/>`;
+                svg += `<rect x="${W * 0.45}" y="${gy - 30}" width="320" height="30" fill="#7a4a24" stroke="${INK}" stroke-width="5"/><path d="M${W * 0.47},${gy} L${W * 0.47},${gy + 120} M${W * 0.45 + 300},${gy} L${W * 0.45 + 300},${gy + 120}" stroke="${INK}" stroke-width="10"/>`;
+                svg += `<path d="M${W * 0.86},${gy + 130} L${W * 0.86},${gy - 90} L${W * 0.98},${gy - 90} L${W * 0.98},${gy + 130} Z" fill="#9a8f84" stroke="${INK}" stroke-width="5"/>` + candle(W * 0.55, gy - 30, 1.2);
+                break;
+              }
+              case 'corral':
+                svg += fence(W * 0.38, W, gy + 90, '#9a6b44') + adobe(W * 0.78, gy, 0.6, '#c98f5e', glow);
+                if (!cosas.has('caballo') && !cosas.has('vaca')) cosas.add('vaca');
+                break;
+              case 'pueblo':
+                svg += adobe(W * 0.42, gy + 10, 0.8 * sc, '#c98f5e', glow) + adobe(W * 0.66, gy + 20, 0.9 * sc, '#d9a87a', glow) + chapel(W * 0.93, gy + 10, 0.8, glow);
+                break;
+              default: // rancho
+                svg += adobe(cx - 40, gy + 30, 1.1 * sc, '#c98f5e', glow) + fence(W * 0.82, W, gy + 100, '#9a6b44') + nopal(W * 0.42, gy + 70, 1, plant);
+            }
+            // Cosas
+            const spot = () => [R(W * (vertical ? 0.15 : 0.42), W * 0.95), gy + R(80, 200)];
+            if (cosas.has('fogata') && lugar !== 'fogata') svg += campfire(...spot(), 1);
+            if (cosas.has('arbol')) svg += tree(...spot(), 1.2, '#5b3a22', plant);
+            if (cosas.has('nopal')) svg += nopal(...spot(), 1, plant);
+            if (cosas.has('cruz') && lugar !== 'panteon') svg += cross(...spot(), 1.1, '#8d8a9c');
+            if (cosas.has('piedra')) svg += rock(...spot(), 1.2);
+            if (cosas.has('carreta')) svg += cart(...spot(), 1);
+            if (cosas.has('veladora') && lugar !== 'capilla') svg += candle(...spot(), 1.2);
+            if (cosas.has('vaca')) svg += cow(...spot(), 1);
+            if (cosas.has('caballo')) svg += horse(...spot(), 1, '#8a5a2b');
+            if (cosas.has('perro')) svg += dog(...spot(), 1, '#c9a77a');
+            if (cosas.has('gallina')) svg += hen(...spot(), 1.1);
+            if (cosas.has('lechuza')) svg += owl(W * 0.88, gy - 220, 1.4);
+            if (cosas.has('huellas')) for (let i = 0; i < 6; i++) svg += `<ellipse cx="${W * 0.5 + i * 60}" cy="${gy + 200 - i * 18}" rx="12" ry="7" fill="${INK}" opacity="0.5"/>`;
+
+            // Personajes de la escena (aspecto fijo del cast), del centro a la derecha
+            const people = (Array.isArray(set.personajes) ? set.personajes : []).slice(0, 4);
+            const byName = new Map((cast || []).map((c) => [String(c.name || '').toLowerCase(), c]));
+            people.forEach((p, i) => {
+              const c = byName.get(String(p.name || '').toLowerCase()) || {kind: 'hombre'};
+              const n = people.length;
+              // En vertical Don Chito va abajo al centro: los personajes van a los lados.
+              const x = vertical ? W * (n === 1 ? 0.78 : [0.2, 0.8, 0.12, 0.88][i]) : W * (0.5 + (n === 1 ? 0.22 : (i / Math.max(1, n - 1)) * 0.36));
+              svg += person(c, BG_POSES.includes(p.pose) ? p.pose : 'parado', x, gy + (vertical ? 60 : 110) + (i % 2) * 24, (vertical ? 1.25 : 1.6) * (n > 2 ? 0.85 : 1), t);
+            });
+            if (cosas.has('linterna')) svg += lantern(...spot(), 1.3);
+            if (cosas.has('lluvia')) for (let i = 0; i < 120; i++) { const x = r() * W, y = r() * H; svg += `<path d="M${x},${y} l-8,26" stroke="#a9c6ff" stroke-width="3" opacity="0.6"/>`; }
+            if (cosas.has('niebla') || (horror && night)) svg += `<path d="M0,${gy + 40} Q${W * 0.25},${gy - 10} ${W * 0.5},${gy + 50} T${W},${gy + 30} L${W},${gy + 140} L0,${gy + 140} Z" fill="#e6e0f5" opacity="0.18"/>`;
+            if (night) svg += `<rect width="${W}" height="${H}" fill="#120c2a" opacity="0.12"/>`;
+            return svg + '</svg>';
+          }
+
+          const isHorrorTopic = (t) => /terror|leyenda|espanto|aparec|llorona|nahual|fantasma|bruja|charro negro|diablo|duende|[áa]nima|pante[óo]n|miedo|maldi|lechuza|chupacabras|sombra|embrujad/i.test(String(t || ''));
+
+          /** Dibuja el fondo de una escena con código, lo pasa a PNG con ffmpeg y devuelve la ruta. */
+          function codeBackground(p, i, vertical) {
+            const dir = join(WORK, p.id + '-bg');
+            mkdirSync(dir, {recursive: true});
+            const svg = sceneSVG(p.scenes[i].set || {}, p.cast || [], {w: vertical ? 1080 : 1920, h: vertical ? 1920 : 1080, t: i, horror: isHorrorTopic(p.topic)});
+            const src = join(dir, `bg-${i}${vertical ? '-v' : ''}.svg`), out = src.replace(/\.svg$/, '.png');
+            writeFileSync(src, svg);
+            ff(['-i', src, '-frames:v', '1', out]);
+            return out;
+          }
+
+          /** Sube el fondo dibujado con código como imagen de la escena (así sirve igual para Shorts, portada y aprobación). */
+          async function uploadCodeBackground(p, i) {
+            const file = codeBackground(p, i, p.format === 'Short');
+            const r = await request('image-upload', {
+              method: 'POST',
+              headers: {'Content-Type': 'image/png', 'X-Project-Id': p.id, 'X-Scene-Index': String(i), 'X-Image-Origin': 'illustration'},
+              body: readFileSync(file),
+            });
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) throw Error(j.error || 'La app no aceptó el fondo dibujado');
+            return j;
+          }
+
           // ---------- Don Chito: guion e imágenes gratis (app), voz edge-tts, edición con Remotion ----------
           async function produceDonChito(p) {
             const id = p.id;
@@ -248,13 +524,28 @@ jobs:
               p = await api('robot/report', {id, scriptDone: true});
               log('Guion listo: ' + p.title + ' (' + p.scenes.length + ' escenas)');
             }
+            // Fondos: 'codigo' = siempre dibujados con código; 'auto' = IA de Cloudflare y, si se acaba la cuota, con código.
+            const bgMode = p.bgMode || 'auto';
+            let codeBg = bgMode === 'codigo';
+            if (codeBg) log('Fondos dibujados con código');
             for (let i = 0; i < p.scenes.length; i++) {
+              if (!p.scenes[i].image && codeBg) {
+                await step('image', `dibujando escena ${i + 1} de ${p.scenes.length} (código)`, i + 1);
+                p = await uploadCodeBackground(p, i);
+              }
               if (!p.scenes[i].image) {
                 await step('image', `dibujando escena ${i + 1} de ${p.scenes.length}`, i + 1);
                 // Solo el fondo: a Don Chito lo dibuja Remotion con código encima.
                 const bg = String(p.scenes[i].visualPrompt || p.scenes[i].text).replace(/don chito('s)?/gi, 'the scene');
                 // Don Chito lo dibuja Remotion: aquí solo el lugar y los personajes de la historia (con su aspecto fijo del cast).
-                p = await api('ai-image', {id, index: i, prompt: bg + '. Without Don Chito (no stick figure ranchero, he is added later). Keep the left third of the picture simple and mostly empty.', force: false});
+                try {
+                  p = await api('ai-image', {id, index: i, prompt: bg + '. Without Don Chito (no stick figure ranchero, he is added later). Keep the left third of the picture simple and mostly empty.', force: false});
+                } catch (e) {
+                  if (bgMode !== 'auto' || !/4006|cuota/i.test(e.message)) throw e;
+                  codeBg = true;
+                  log('Se acabó la cuota de dibujos de IA: el resto de los fondos se dibujan con código.');
+                  p = await uploadCodeBackground(p, i);
+                }
               }
               done++;
               const a = p.scenes[i].audio;
@@ -349,7 +640,10 @@ jobs:
               const s = p.scenes[i];
               if (!s.image || !s.audio || s.audio.text !== s.text) throw Error(`A la escena ${i + 1} le falta imagen o voz`);
               const ext = s.image.type === 'image/png' ? 'png' : s.image.type === 'image/webp' ? 'webp' : 'jpg';
-              await download(s.image.url, join(pub, `img-${i}.${ext}`));
+              if (s.set && /Ilustraci[óo]n original/.test(String(s.image.label || '')) && p.channel === 'donchito') {
+                // Fondo dibujado con código: se vuelve a dibujar en el formato exacto (vertical en los Shorts).
+                writeFileSync(join(pub, `img-${i}.${ext}`), readFileSync(codeBackground(p, i, p.format === 'Short')));
+              } else await download(s.image.url, join(pub, `img-${i}.${ext}`));
               const aud = await download(s.audio.url, join(work, `aud-${i}.mp3`));
               const dur = Math.min(30, Math.max(1.5, probe(aud) + 0.3));
               const frames = Math.round(dur * FPS);
