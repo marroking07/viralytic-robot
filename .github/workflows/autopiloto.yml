@@ -39,7 +39,6 @@ jobs:
         env:
           APP_URL: https://viralytic-ai.pll-studio.workers.dev
           REMOTION_DIR: /tmp/remotion-kit
-          REMOTION_DIR: /tmp/remotion-kit
         run: |
           cat > robot.mjs <<'ROBOT_EOF'
           // Robot del autopiloto de Viralytic AI.
