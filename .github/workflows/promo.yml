@@ -941,7 +941,7 @@ jobs:
               try { words = JSON.parse(readFileSync(wj, 'utf8')); } catch {}
               scenes.push({text, set, image: {type: 'image/png', label: 'Ilustración original'}, audio: {local: out, text, words}});
             }
-            const p = {id: 'promo', channel: 'donchito', format: 'Short', topic: '', cast: [], coverTitle: cfg.hook || '', title: cfg.hook || '', outro: cfg.outro || '', scenes};
+            const p = {id: 'promovid', channel: 'donchito', format: 'Short', topic: '', cast: [], coverTitle: cfg.hook || '', title: cfg.hook || '', outro: cfg.outro || '', scenes};
             const {file} = await renderRemotion(p);
             const final = join(dir, 'promo.mp4');
             execFileSync('cp', [file, final]);
