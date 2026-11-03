@@ -522,11 +522,11 @@ jobs:
             const cook = ['olla', 'comal', 'cazuela', 'carne', 'chiles', 'cebolla', 'ajo', 'tortillas', 'plato'].filter((c) => cosas.has(c));
             if (cook.length) {
               // Mesa grande de madera con los ingredientes (en vertical, más arriba porque Don Chito va abajo al centro).
-              const ty = vertical ? gy - 40 : gy + 150;
+              const ty = vertical ? gy - 680 : gy + 150; // en vertical: repisa arriba, para no tapar a Don Chito
               svg += `<rect x="${vertical ? W * 0.04 : W * 0.4}" y="${ty}" width="${vertical ? W * 0.92 : W * 0.58}" height="40" fill="#7a4a24" stroke="${INK}" stroke-width="6"/>`;
               const n = cook.length;
               const xs = cook.map((_, k) => (vertical ? W * (n === 1 ? 0.5 : 0.16 + (k / (n - 1)) * 0.68) : W * (n === 1 ? 0.68 : 0.48 + (k / (n - 1)) * 0.42)));
-              const big = (vertical ? 1.5 : 2.1) * (n > 3 ? 0.72 : n > 2 ? 0.85 : 1);
+              const big = (vertical ? 1.15 : 2.1) * (n > 3 ? 0.72 : n > 2 ? 0.85 : 1);
               cook.forEach((c, k) => {
                 const x = xs[k], y = ty;
                 svg += {olla: pot, comal, cazuela, carne: meat, chiles, cebolla: onion, ajo: garlic, tortillas, plato: dish}[c](x, y, big);
@@ -541,8 +541,8 @@ jobs:
               const c = byName.get(String(p.name || '').toLowerCase()) || {kind: 'hombre'};
               const n = people.length;
               // En vertical Don Chito va abajo al centro: los personajes van a los lados.
-              const x = vertical ? W * (n === 1 ? 0.78 : [0.2, 0.8, 0.12, 0.88][i]) : W * (0.5 + (n === 1 ? 0.22 : (i / Math.max(1, n - 1)) * 0.36));
-              svg += person(c, BG_POSES.includes(p.pose) ? p.pose : 'parado', x, gy + (vertical ? 60 : 110) + (i % 2) * 24, (vertical ? 1.25 : 1.6) * (n > 2 ? 0.85 : 1), t);
+              const x = vertical ? W * (n === 1 ? 0.84 : [0.16, 0.84, 0.16, 0.84][i]) : W * (0.5 + (n === 1 ? 0.22 : (i / Math.max(1, n - 1)) * 0.36));
+              svg += person(c, BG_POSES.includes(p.pose) ? p.pose : 'parado', x, gy + (vertical ? 60 : 110) + (i % 2) * 24, (vertical ? 1.05 : 1.6) * (n > 2 ? 0.85 : 1), t);
             });
             if (cosas.has('linterna')) svg += lantern(...spot(), 1.3);
             if (cosas.has('lluvia')) for (let i = 0; i < 120; i++) { const x = r() * W, y = r() * H; svg += `<path d="M${x},${y} l-8,26" stroke="#a9c6ff" stroke-width="3" opacity="0.6"/>`; }
