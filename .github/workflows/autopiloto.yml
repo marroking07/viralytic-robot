@@ -427,7 +427,7 @@ jobs:
 
             // Lugar (lo importante va del centro a la derecha; el tercio izquierdo queda para Don Chito)
             const R = (a, b) => a + r() * (b - a);
-            const cx = vertical ? W * 0.5 : W * 0.62;
+            const cx = vertical ? W * 0.8 : W * 0.62; // en vertical, a la derecha: Don Chito va al centro
             const sc = vertical ? 0.95 : 1;
             const plant = night ? '#2c4a3a' : '#5f9a4a';
             switch (lugar) {
@@ -440,7 +440,7 @@ jobs:
                 break;
               }
               case 'fogata':
-                svg += campfire(cx, gy + 150, 1.7 * sc) + rock(cx - 160, gy + 150, 0.9) + nopal(W * 0.93, gy + 40, 1, plant) + adobe(W * 0.8, gy + 10, 0.9 * sc, '#c98f5e', glow);
+                svg += campfire(vertical ? W * 0.82 : cx, vertical ? gy + 250 : gy + 150, 1.7 * sc) + rock(cx - 160, gy + 150, 0.9) + nopal(W * 0.93, gy + 40, 1, plant) + adobe(W * 0.8, gy + 10, 0.9 * sc, '#c98f5e', glow);
                 break;
               case 'panteon':
                 for (let i = 0; i < 6; i++) svg += i % 2 ? cross(R(W * 0.42, W * 0.97), gy + R(30, 160), R(0.9, 1.4), '#8d8a9c') : tomb(R(W * 0.42, W * 0.97), gy + R(30, 160), R(0.9, 1.3));
@@ -505,7 +505,7 @@ jobs:
                 svg += adobe(cx - 40, gy + 30, 1.1 * sc, '#c98f5e', glow) + fence(W * 0.82, W, gy + 100, '#9a6b44') + nopal(W * 0.42, gy + 70, 1, plant);
             }
             // Cosas
-            const spot = () => [R(W * (vertical ? 0.15 : 0.42), W * 0.95), gy + R(80, 200)];
+            const spot = () => [vertical ? (r() < 0.5 ? R(W * 0.08, W * 0.22) : R(W * 0.78, W * 0.92)) : R(W * 0.42, W * 0.95), gy + R(80, 200)]; // en vertical, a los lados de Don Chito
             if (cosas.has('fogata') && lugar !== 'fogata') svg += campfire(...spot(), 1);
             if (cosas.has('arbol')) svg += tree(...spot(), 1.2, '#5b3a22', plant);
             if (cosas.has('nopal')) svg += nopal(...spot(), 1, plant);
