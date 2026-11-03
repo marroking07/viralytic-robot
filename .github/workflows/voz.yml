@@ -23,6 +23,54 @@ jobs:
         env:
           LINEAS: ${{ inputs.lineas }}
         run: |
+          pip install -q edge-tts imageio-ffmpeg
+          cat > voz.py <<'PY'
+          import asyncio, os, json, base64, subprocess, edge_tts, imageio_ffmpeg, re
+          FF = imageio_ffmpeg.get_ffmpeg_exe()
+          async def main():
+              out = []
+              for i, t in enumerate(os.environ['LINEAS'].split('|')):
+                  t = t.strip()
+                  await edge_tts.Communicate(t, 'es-MX-JorgeNeural', rate='-5%', pitch='-2Hz').save(f'l{i}.mp3')
+                  subprocess.run([FF,'-loglevel','error','-y','-i',f'l{i}.mp3','-ac','1','-ar','24000','-c:a','libmp3lame','-b:a','32k',f'l{i}.s.mp3'], check=True)
+                  info = subprocess.run([FF,'-i',f'l{i}.mp3'],capture_output=True,text=True).stderr
+                  h,m,s = re.search(r'Duration: (\d+):(\d+):([\d.]+)', info).groups()
+                  d = int(h)*3600+int(m)*60+float(s)
+                  out.append({'text': t, 'dur': d, 'b64': base64.b64encode(open(f'l{i}.s.mp3','rb').read()).decode()})
+              json.dump(out, open('voz.json','w'))
+          asyncio.run(main())
+          PY
+          python3 voz.py
+          ls -la voz.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voz
+          path: voz.json
+name: Voz Don Chito
+
+on:
+  workflow_dispatch:
+    inputs:
+      lineas:
+        description: 'Frases separadas por |'
+        required: true
+        default: '¡Quiúbole, raza! ¿Ya nos sigues?|Aquí hay historias de espanto del rancho mexicano.|Misterios del campo... ¡hasta ovnis, compadre!|Y recetas de rancho, como las de la abuela.|¡Síguenos en arroba donchito punto rancho! ¡Ándele, no se haga!'
+
+permissions:
+  contents: read
+
+jobs:
+  voz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Voz con edge-tts
+        env:
+          LINEAS: ${{ inputs.lineas }}
+        run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg > /dev/null
           pip install -q edge-tts
           cat > voz.py <<'PY'
