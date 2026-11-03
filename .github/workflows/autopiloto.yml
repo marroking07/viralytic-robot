@@ -711,7 +711,7 @@ jobs:
                 // Fondo dibujado con código: se vuelve a dibujar en el formato exacto (vertical en los Shorts).
                 writeFileSync(join(pub, `img-${i}.${ext}`), readFileSync(codeBackground(p, i, p.format === 'Short')));
               } else await download(s.image.url, join(pub, `img-${i}.${ext}`));
-              const aud = await download(s.audio.url, join(work, `aud-${i}.mp3`));
+              const aud = s.audio.local || (await download(s.audio.url, join(work, `aud-${i}.mp3`)));
               const dur = Math.min(30, Math.max(1.5, probe(aud) + 0.3));
               const frames = Math.round(dur * FPS);
               durations.push(Math.round((frames / FPS) * 100) / 100);
@@ -726,7 +726,7 @@ jobs:
               format: p.format,
               hook: String(p.coverTitle || p.title || '').toUpperCase().slice(0, vertical ? 40 : 55),
               badge: '', // sin letrero con el nombre en las imágenes (pedido de Luis)
-              outro: vertical ? '▶ Historia completa en el canal' : '',
+              outro: p.outro !== undefined ? p.outro : vertical ? '▶ Historia completa en el canal' : '',
               scenes,
             };
             const propsFile = join(work, 'props.json');
@@ -927,6 +927,31 @@ jobs:
             }
           }
 
-          if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop())) await main();
+          /** Video corto de promoción de Don Chito (PROMO = JSON {hook, outro, lines:[{text, set}]}). Deja el MP4 en $WORK/promo/promo.mp4. */
+          async function promoMain() {
+            const cfg = JSON.parse(process.env.PROMO);
+            const dir = join(WORK, 'promo');
+            mkdirSync(dir, {recursive: true});
+            const py = join(dir, 'edge.py');
+            writeFileSync(py, EDGE_PY);
+            const scenes = [];
+            for (let i = 0; i < cfg.lines.length; i++) {
+              const {text, set} = cfg.lines[i];
+              const out = join(dir, `v${i}.mp3`), wj = join(dir, `v${i}.json`);
+              for (let a = 1; a <= 3; a++) {
+                try { execFileSync('python3', [py, text, 'es-MX-JorgeNeural', '-5%', '-2Hz', out, wj], {stdio: ['ignore', 'ignore', 'pipe'], timeout: 120000}); break; } catch (e) { if (a === 3) throw e; await sleep(3000 * a); }
+              }
+              let words = null;
+              try { words = JSON.parse(readFileSync(wj, 'utf8')); } catch {}
+              scenes.push({text, set, image: {type: 'image/png', label: 'Ilustración original'}, audio: {local: out, text, words}});
+            }
+            const p = {id: 'promo', channel: 'donchito', format: 'Short', topic: '', cast: [], coverTitle: cfg.hook || '', title: cfg.hook || '', outro: cfg.outro || '', scenes};
+            const {file} = await renderRemotion(p);
+            const final = join(dir, 'promo.mp4');
+            execFileSync('cp', [file, final]);
+            log('Promo lista: ' + final + ' ' + (statSync(final).size / 1e6).toFixed(1) + ' MB');
+          }
+
+          if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop())) await (process.env.PROMO ? promoMain() : main());
           ROBOT_EOF
           node robot.mjs
