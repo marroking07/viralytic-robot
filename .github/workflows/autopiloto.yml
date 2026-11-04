@@ -240,7 +240,7 @@ jobs:
           const BG_LUGARES = ['rancho', 'arroyo', 'fogata', 'panteon', 'milpa', 'camino', 'cerro', 'pozo', 'hacienda', 'cocina', 'capilla', 'rio', 'monte', 'corral', 'pueblo', 'nave'];
           const BG_HORAS = ['noche', 'atardecer', 'dia', 'amanecer'];
           const BG_COSAS = ['luna', 'estrellas', 'niebla', 'linterna', 'veladora', 'fogata', 'perro', 'caballo', 'vaca', 'gallina', 'lechuza', 'arbol', 'nopal', 'cruz', 'piedra', 'carreta', 'ventana', 'lluvia', 'huellas', 'olla', 'comal', 'cazuela', 'carne', 'chiles', 'cebolla', 'ajo', 'tortillas', 'plato', 'ovni'];
-          const BG_TIPOS = ['hombre', 'mujer', 'nino', 'nina', 'anciano', 'anciana', 'llorona', 'charro_negro', 'sombra', 'nahual', 'jinete_sin_cabeza', 'fantasma', 'curandera', 'extraterrestre'];
+          const BG_TIPOS = ['hombre', 'mujer', 'nino', 'nina', 'anciano', 'anciana', 'llorona', 'charro_negro', 'sombra', 'nahual', 'jinete_sin_cabeza', 'fantasma', 'curandera', 'extraterrestre', 'tacha'];
           const BG_POSES = ['parado', 'camina', 'asustado', 'senala', 'llora', 'flota', 'corre', 'sentado', 'reza'];
 
           const INK = '#1f150d';
@@ -346,6 +346,26 @@ jobs:
           <path d="M-40,${headY - 6} Q0,${headY - 60} 40,${headY - 6} L46,${headY + 66} Q0,${headY + 50} -46,${headY + 66} Z" fill="#ffffff" opacity="0.45" stroke="${INK}" stroke-width="3"/>
           ${kind === 'llorona' ? `<path d="M-12,${headY + 8} L-14,${headY + 24} M12,${headY + 8} L14,${headY + 24}" stroke="#7fb3ff" stroke-width="4"/><path d="M-9,${headY + 22} Q0,${headY + 14} 9,${headY + 22}" stroke="${INK}" stroke-width="4" fill="none"/>` : ''}
           ${eyes(12, 4)}</g>`;
+            }
+            if (kind === 'tacha' || /tacha/i.test(String(c.name || ''))) {
+              // Doña Tacha, la esposa de Don Chito: chongo canoso, aretes, vestido azul y mandil blanco con florecitas.
+              const dress = col(c.color, '#2f6db5');
+              return `<g transform="translate(${x} ${y}) scale(${s})" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="0" cy="4" rx="46" ry="8" fill="rgba(0,0,0,0.25)"/>
+          <path d="M0,-56 L-18,0 M0,-56 L18,0" fill="none" stroke="${INK}" stroke-width="${sw}"/>
+          <path d="M0,-132 L-44,-26 L44,-26 Z" fill="${dress}" stroke="${INK}" stroke-width="6"/>
+          <path d="M-16,-104 L16,-104 L28,-30 L-28,-30 Z" fill="#fbf6ea" stroke="${INK}" stroke-width="4"/>
+          ${[[-8, -86], [9, -70], [-12, -52], [12, -44]].map(([a, b]) => `<circle cx="${a}" cy="${b}" r="5" fill="${COLORS.rojo}" stroke="none"/><circle cx="${a}" cy="${b}" r="2" fill="#ffd166" stroke="none"/>`).join('')}
+          <path d="M-16,-104 Q0,-96 16,-104" fill="none" stroke="${COLORS.rojo}" stroke-width="4"/>
+          <path d="${arms}" fill="none" stroke="${INK}" stroke-width="${sw}"/>
+          <circle cx="0" cy="${headY - 30}" r="22" fill="#d9d9d9" stroke="${INK}" stroke-width="5"/>
+          <circle cx="0" cy="${headY}" r="${R}" fill="white" stroke="${INK}" stroke-width="7"/>
+          <path d="M-36,${headY - 4} Q-34,${headY - 40} 0,${headY - 38} Q34,${headY - 40} 36,${headY - 4} Q24,${headY - 22} 0,${headY - 22} Q-24,${headY - 22} -36,${headY - 4} Z" fill="#cfcfcf" stroke="${INK}" stroke-width="4"/>
+          <circle cx="-36" cy="${headY + 10}" r="5" fill="#ffd166" stroke="${INK}" stroke-width="2"/><circle cx="36" cy="${headY + 10}" r="5" fill="#ffd166" stroke="${INK}" stroke-width="2"/>
+          ${eyes(12, 4.5)}<path d="M-24,${headY - 12} L-6,${headY - 10} M6,${headY - 10} L24,${headY - 12}" stroke="${INK}" stroke-width="3"/>
+          <circle cx="-20" cy="${headY + 10}" r="7" fill="#f2a1a1" stroke="none" opacity="0.8"/><circle cx="20" cy="${headY + 10}" r="7" fill="#f2a1a1" stroke="none" opacity="0.8"/>
+          ${mouth}
+          </g>`;
             }
             if (kind === 'extraterrestre') {
               // Marcianito verde de palito: cabeza grande de huevo, ojos negros grandes y antenitas.
@@ -525,7 +545,8 @@ jobs:
               const ty = vertical ? gy - 680 : gy + 150; // en vertical: repisa arriba, para no tapar a Don Chito
               svg += `<rect x="${vertical ? W * 0.04 : W * 0.4}" y="${ty}" width="${vertical ? W * 0.92 : W * 0.58}" height="40" fill="#7a4a24" stroke="${INK}" stroke-width="6"/>`;
               const n = cook.length;
-              const xs = cook.map((_, k) => (vertical ? W * (n === 1 ? 0.5 : 0.16 + (k / (n - 1)) * 0.68) : W * (n === 1 ? 0.68 : 0.48 + (k / (n - 1)) * 0.42)));
+              const withPeople = Array.isArray(set.personajes) && set.personajes.length > 0;
+              const xs = cook.map((_, k) => (vertical ? W * (n === 1 ? 0.5 : 0.16 + (k / (n - 1)) * 0.68) : withPeople ? W * (n === 1 ? 0.56 : 0.42 + (k / (n - 1)) * 0.26) : W * (n === 1 ? 0.68 : 0.48 + (k / (n - 1)) * 0.42)));
               const big = (vertical ? 1.15 : 2.1) * (n > 3 ? 0.72 : n > 2 ? 0.85 : 1);
               cook.forEach((c, k) => {
                 const x = xs[k], y = ty;
@@ -541,7 +562,8 @@ jobs:
               const c = byName.get(String(p.name || '').toLowerCase()) || {kind: 'hombre'};
               const n = people.length;
               // En vertical Don Chito va abajo al centro: los personajes van a los lados.
-              const x = vertical ? W * (n === 1 ? 0.84 : [0.16, 0.84, 0.16, 0.84][i]) : W * (0.5 + (n === 1 ? 0.22 : (i / Math.max(1, n - 1)) * 0.36));
+              const kitchen = (Array.isArray(set.cosas) ? set.cosas : []).some((c) => ['olla', 'comal', 'cazuela', 'carne', 'chiles', 'cebolla', 'ajo', 'tortillas', 'plato'].includes(c));
+              const x = vertical ? W * (n === 1 ? 0.84 : [0.16, 0.84, 0.16, 0.84][i]) : kitchen ? W * (n === 1 ? 0.86 : [0.8, 0.93, 0.87][i]) : W * (0.5 + (n === 1 ? 0.22 : (i / Math.max(1, n - 1)) * 0.36));
               svg += person(c, BG_POSES.includes(p.pose) ? p.pose : 'parado', x, gy + (vertical ? 60 : 110) + (i % 2) * 24, (vertical ? 1.05 : 1.6) * (n > 2 ? 0.85 : 1), t);
             });
             if (cosas.has('linterna')) svg += lantern(...spot(), 1.3);
@@ -554,10 +576,23 @@ jobs:
           const isHorrorTopic = (t) => /terror|leyenda|espanto|aparec|llorona|nahual|fantasma|bruja|charro negro|diablo|duende|[áa]nima|pante[óo]n|miedo|maldi|lechuza|chupacabras|sombra|embrujad|ovni|extraterrestre|marciano|abduc|alien/i.test(String(t || ''));
 
           /** Dibuja el fondo de una escena con código, lo pasa a PNG con ffmpeg y devuelve la ruta. */
+          /** En las recetas con Doña Tacha, ella siempre sale cocinando junto a Don Chito. */
+          function withTacha(p, set) {
+            const cast = Array.isArray(p.cast) ? [...p.cast] : [];
+            if (!/tacha/i.test(String(p.topic || '') + ' ' + String(p.title || ''))) return {set, cast};
+            let t = cast.find((c) => /tacha/i.test(String(c.name || '')));
+            if (!t) cast.push((t = {name: 'Doña Tacha', kind: 'tacha', color: 'azul'}));
+            const ps = Array.isArray(set.personajes) ? set.personajes : [];
+            if (['cocina', 'rancho'].includes(set.lugar) && !ps.some((x) => /tacha/i.test(String(x.name || ''))))
+              return {cast, set: {...set, personajes: [{name: t.name, pose: 'parado'}, ...ps].slice(0, 3)}};
+            return {set, cast};
+          }
+
           function codeBackground(p, i, vertical) {
             const dir = join(WORK, p.id + '-bg');
             mkdirSync(dir, {recursive: true});
-            const svg = sceneSVG(p.scenes[i].set || {}, p.cast || [], {w: vertical ? 1080 : 1920, h: vertical ? 1920 : 1080, t: i, horror: isHorrorTopic(p.topic)});
+            const wt = withTacha(p, p.scenes[i].set || {});
+            const svg = sceneSVG(wt.set, wt.cast, {w: vertical ? 1080 : 1920, h: vertical ? 1920 : 1080, t: i, horror: isHorrorTopic(p.topic)});
             const src = join(dir, `bg-${i}${vertical ? '-v' : ''}.svg`), out = src.replace(/\.svg$/, '.png');
             writeFileSync(src, svg);
             ff(['-i', src, '-frames:v', '1', out]);
@@ -945,7 +980,7 @@ jobs:
               try { words = JSON.parse(readFileSync(wj, 'utf8')); } catch {}
               scenes.push({text, set, image: {type: 'image/png', label: 'Ilustración original'}, audio: {local: out, text, words}});
             }
-            const p = {id: 'promo', channel: 'donchito', format: 'Short', topic: '', cast: [], coverTitle: cfg.hook || '', title: cfg.hook || '', outro: cfg.outro || '', scenes};
+            const p = {id: 'promovid', channel: 'donchito', format: 'Short', topic: '', cast: [], coverTitle: cfg.hook || '', title: cfg.hook || '', outro: cfg.outro || '', scenes};
             const {file} = await renderRemotion(p);
             const final = join(dir, 'promo.mp4');
             execFileSync('cp', [file, final]);
