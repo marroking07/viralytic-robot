@@ -1,0 +1,48 @@
+name: Ajustes Don Chito
+
+on:
+  workflow_dispatch:
+    inputs:
+      cambios:
+        description: 'JSON con los cambios (_front, _remove, _briefAdd y ajustes normales)'
+        required: true
+        default: '{}'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  ajustes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Cambiar ajustes
+        env:
+          APP_URL: https://viralytic-ai.pll-studio.workers.dev
+          CAMBIOS: ${{ inputs.cambios }}
+        run: |
+          cat > a.mjs <<'EOF2'
+          const APP = process.env.APP_URL;
+          const t = await fetch(process.env.ACTIONS_ID_TOKEN_REQUEST_URL + '&audience=viralytic-ai', {headers: {Authorization: 'bearer ' + process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}}).then(r => r.json());
+          const H = {Authorization: 'Bearer ' + t.value, 'Content-Type': 'application/json'};
+          const g = await fetch(APP + '/api/autopilot?canal=donchito', {headers: H});
+          const cur = await g.json();
+          if (!g.ok) { console.log('ERROR', g.status, JSON.stringify(cur)); process.exit(1); }
+          const s = {...cur.settings};
+          console.log('ANTES perDay=' + s.perDay, 'cola=' + JSON.stringify(s.queue.slice(0, 5)), 'resumen=' + JSON.stringify(cur.summary));
+          const c = JSON.parse(process.env.CAMBIOS || '{}');
+          if (c._remove) s.queue = s.queue.filter((q) => !new RegExp(c._remove, 'i').test(q));
+          if (Array.isArray(c._front)) s.queue = [...c._front, ...s.queue.filter((q) => !c._front.includes(q))];
+          if (c._briefAdd && !String(s.brief || '').includes(c._briefAdd.slice(0, 40))) s.brief = (String(s.brief || '') + '\n' + c._briefAdd).trim();
+          for (const [k, v] of Object.entries(c)) if (!k.startsWith('_')) s[k] = v;
+          const p = await fetch(APP + '/api/autopilot', {method: 'POST', headers: H, body: JSON.stringify({...s, canal: 'donchito'})});
+          const out = await p.json();
+          console.log('DESPUES', p.status, 'perDay=' + out.settings?.perDay, 'enabled=' + out.settings?.enabled);
+          console.log('COLA', JSON.stringify(out.settings?.queue));
+          console.log('BRIEF', JSON.stringify(out.settings?.brief));
+          if (!p.ok) process.exit(1);
+          EOF2
+          node a.mjs
