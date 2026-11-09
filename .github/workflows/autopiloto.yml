@@ -45,7 +45,7 @@ jobs:
           // Corre en GitHub Actions: pide a tu app el siguiente video, genera guion/imágenes con tu app,
           // la voz con edge-tts (gratis) y arma el MP4 (MARRO con ffmpeg, Don Chito con Remotion).
           // Lo deja "LISTO PARA REVISIÓN". Nunca publica: tú apruebas en la app.
-          import {execFileSync} from 'node:child_process';
+          import {execFileSync, spawnSync} from 'node:child_process';
           import {mkdirSync, writeFileSync, readFileSync, statSync, rmSync, existsSync} from 'node:fs';
           import {join} from 'node:path';
           import {createHash} from 'node:crypto';
@@ -415,7 +415,7 @@ jobs:
           }
 
           /** Dibuja el fondo completo de una escena. t = número de escena (varía un poco la composición). */
-          function sceneSVG(set = {}, cast = [], {w = 1920, h = 1080, t = 0, horror = false} = {}) {
+          function sceneSVG(set = {}, cast = [], {w = 1920, h = 1080, t = 0, horror = false, bare = false} = {}) {
             const lugar = BG_LUGARES.includes(set.lugar) ? set.lugar : 'rancho';
             const hora = BG_HORAS.includes(set.hora) ? set.hora : horror ? 'noche' : 'dia';
             const cosas = new Set((Array.isArray(set.cosas) ? set.cosas : []).filter((c) => BG_COSAS.includes(c)));
@@ -450,11 +450,15 @@ jobs:
             const cx = vertical ? W * 0.8 : W * 0.62; // en vertical, a la derecha: Don Chito va al centro
             const sc = vertical ? 0.95 : 1;
             const plant = night ? '#2c4a3a' : '#5f9a4a';
+            // bare: solo cielo, cerros y suelo (sirve para medir qué queda detrás de Don Chito).
+            if (bare && !['cocina', 'nave'].includes(lugar)) return svg + '</svg>';
             switch (lugar) {
               case 'arroyo':
               case 'rio': {
                 const water = lugar === 'rio' || cosas.has('lluvia');
-                svg += `<path d="M${W * 0.3},${H} C${W * 0.45},${gy + 140} ${W * 0.55},${gy + 60} ${W},${gy + 30} L${W},${gy + 110} C${W * 0.7},${gy + 150} ${W * 0.6},${gy + 240} ${W * 0.55},${H} Z" fill="${water ? (night ? '#3d6aa8' : '#6fb3e0') : night ? '#4a3c5c' : '#e3c992'}" stroke="${INK}" stroke-width="5"/>`;
+                // En vertical el agua corre por la derecha, lejos de Don Chito.
+                const a0 = vertical ? 0.7 : 0.3, a1 = vertical ? 0.95 : 0.55;
+                svg += `<path d="M${W * a0},${H} C${W * (a0 + 0.08)},${gy + 140} ${W * (a0 + 0.14)},${gy + 60} ${W},${gy + 30} L${W},${gy + 110} C${W * (vertical ? 0.98 : 0.7)},${gy + 150} ${W * (vertical ? 0.97 : 0.6)},${gy + 240} ${W * a1},${H} Z" fill="${water ? (night ? '#3d6aa8' : '#6fb3e0') : night ? '#4a3c5c' : '#e3c992'}" stroke="${INK}" stroke-width="5"/>`;
                 if (!water) for (let i = 0; i < 8; i++) svg += `<path d="M${R(W * 0.45, W * 0.95)},${R(gy + 50, gy + 200)} l${R(-30, 30)},${R(10, 30)}" stroke="${INK}" stroke-width="3" opacity="0.6"/>`;
                 svg += tree(W * 0.86, gy + 30, 1.3 * sc, '#5b3a22', plant) + rock(W * 0.7, gy + 120, 1.2) + nopal(W * 0.95, gy + 60, 0.9, plant);
                 break;
@@ -467,20 +471,25 @@ jobs:
                 svg += tree(W * 0.9, gy + 20, 1.5 * sc, '#3c2a3a', null) + candle(W * 0.62, gy + 170, 1.1);
                 break;
               case 'milpa':
-                for (let i = 0; i < 14; i++) svg += corn(W * (0.4 + i * 0.045), gy + 40 + (i % 3) * 30, 1.1 * sc);
+                // En vertical la milpa va a los lados (Don Chito al centro).
+                for (let i = 0; i < 14; i++) svg += corn(W * (vertical ? (i < 5 ? 0.03 + i * 0.05 : 0.74 + (i - 5) * 0.03) : 0.4 + i * 0.045), gy + 40 + (i % 3) * 30, 1.1 * sc);
                 break;
               case 'camino':
-                svg += `<path d="M${W * 0.42},${H} L${W * 0.62},${gy} L${W * 0.68},${gy} L${W * 0.95},${H} Z" fill="${night ? '#5a4a6a' : '#e0c690'}" stroke="${INK}" stroke-width="5"/>` + tree(W * 0.9, gy + 20, 1.2, '#5b3a22', plant) + nopal(W * 0.45, gy + 30, 0.9, plant);
+                svg += vertical
+                  ? `<path d="M${W * 0.74},${H} L${W * 0.8},${gy} L${W * 0.86},${gy} L${W * 1.08},${H} Z" fill="${night ? '#5a4a6a' : '#e0c690'}" stroke="${INK}" stroke-width="5"/>` + tree(W * 0.12, gy + 20, 1.2, '#5b3a22', plant) + nopal(W * 0.24, gy + 30, 0.9, plant)
+                  : `<path d="M${W * 0.42},${H} L${W * 0.62},${gy} L${W * 0.68},${gy} L${W * 0.95},${H} Z" fill="${night ? '#5a4a6a' : '#e0c690'}" stroke="${INK}" stroke-width="5"/>` + tree(W * 0.9, gy + 20, 1.2, '#5b3a22', plant) + nopal(W * 0.45, gy + 30, 0.9, plant);
                 break;
               case 'cerro':
               case 'monte':
-                svg += tree(W * 0.55, gy + 30, 1.4, '#5b3a22', plant) + tree(W * 0.75, gy + 10, 1.1, '#5b3a22', plant) + tree(W * 0.92, gy + 40, 1.5, '#5b3a22', plant) + rock(W * 0.66, gy + 140, 1.4) + nopal(W * 0.45, gy + 80, 1.1, plant);
+                svg += vertical
+                  ? tree(W * 0.1, gy + 30, 1.3, '#5b3a22', plant) + tree(W * 0.84, gy + 10, 1.1, '#5b3a22', plant) + tree(W * 0.96, gy + 40, 1.4, '#5b3a22', plant) + rock(W * 0.8, gy + 160, 1.2) + nopal(W * 0.22, gy + 80, 1, plant)
+                  : tree(W * 0.55, gy + 30, 1.4, '#5b3a22', plant) + tree(W * 0.75, gy + 10, 1.1, '#5b3a22', plant) + tree(W * 0.92, gy + 40, 1.5, '#5b3a22', plant) + rock(W * 0.66, gy + 140, 1.4) + nopal(W * 0.45, gy + 80, 1.1, plant);
                 break;
               case 'pozo':
                 svg += well(cx + 60, gy + 120, 1.3 * sc) + tree(W * 0.9, gy + 20, 1.3, '#5b3a22', plant) + rock(cx - 120, gy + 140, 0.8);
                 break;
               case 'hacienda':
-                svg += hacienda(W * (vertical ? 0.25 : 0.5), gy + 30, 1.2 * sc, glow) + nopal(W * 0.95, gy + 70, 1, plant);
+                svg += hacienda(W * (vertical ? 0.92 : 0.5), gy + 30, (vertical ? 0.8 : 1.2) * sc, glow) + nopal(W * (vertical ? 0.12 : 0.95), gy + 70, 1, plant);
                 break;
               case 'capilla':
                 svg += chapel(cx + 80, gy + 30, 1.1 * sc, glow) + cross(W * 0.93, gy + 120, 1.2, '#8d8a9c') + candle(cx - 80, gy + 160, 1.2);
@@ -488,6 +497,7 @@ jobs:
               case 'cocina': {
                 svg = svg.replace(/<rect width="\d+" height="\d+" fill="url\(#sky\)"\/>/, '');
                 svg += `<rect width="${W}" height="${H}" fill="${glow ? '#5a3a33' : '#d9b48a'}"/><rect x="0" y="${gy}" width="${W}" height="${H - gy}" fill="${glow ? '#3a2622' : '#a0764f'}"/><line x1="0" y1="${gy}" x2="${W}" y2="${gy}" stroke="${INK}" stroke-width="5"/>`;
+                if (bare) break;
                 svg += `<rect x="${W * 0.72}" y="${gy - 360}" width="220" height="160" fill="${night ? '#1d1840' : '#9fd6f2'}" stroke="${INK}" stroke-width="8"/><path d="M${W * 0.72 + 110},${gy - 360} L${W * 0.72 + 110},${gy - 200}" stroke="${INK}" stroke-width="6"/>`;
                 const cooking = ['olla', 'comal', 'cazuela', 'carne', 'chiles', 'cebolla', 'ajo', 'tortillas', 'plato'].some((c) => cosas.has(c));
                 // Colgadero con cazuelitas y ristra de chiles en la pared (cocina de rancho).
@@ -504,26 +514,30 @@ jobs:
                 svg = svg.replace(/<rect width="\d+" height="\d+" fill="url\(#sky\)"\/>/, '');
                 svg += `<rect width="${W}" height="${H}" fill="#3b3f5c"/><path d="M0,0 Q${W / 2},${H * 0.18} ${W},0 Z" fill="#2a2d45"/><rect x="0" y="${gy}" width="${W}" height="${H - gy}" fill="#5c6280"/><line x1="0" y1="${gy}" x2="${W}" y2="${gy}" stroke="${INK}" stroke-width="5"/>`;
                 for (let i = 1; i < 6; i++) svg += `<line x1="${(W / 6) * i}" y1="0" x2="${(W / 6) * i}" y2="${gy}" stroke="#2a2d45" stroke-width="6"/>`;
-                const wx = W * (vertical ? 0.5 : 0.72), wy = gy - (vertical ? 620 : 430), wr = vertical ? 200 : 170;
+                if (bare) break;
+                const wx = W * (vertical ? 0.5 : 0.72), wy = gy - (vertical ? 820 : 430), wr = vertical ? 200 : 170;
                 svg += `<circle cx="${wx}" cy="${wy}" r="${wr + 24}" fill="#9aa3b5" stroke="${INK}" stroke-width="7"/><circle cx="${wx}" cy="${wy}" r="${wr}" fill="#0d0a24" stroke="${INK}" stroke-width="6"/>`;
                 for (let i = 0; i < 26; i++) { const a = r() * 6.283, d = r() * wr * 0.9; svg += `<circle cx="${(wx + Math.cos(a) * d) | 0}" cy="${(wy + Math.sin(a) * d) | 0}" r="${(1.5 + r() * 3).toFixed(1)}" fill="#fff"/>`; }
                 svg += `<circle cx="${wx - wr * 0.35}" cy="${wy + wr * 0.3}" r="${wr * 0.28}" fill="#3f8f4f" stroke="${INK}" stroke-width="4"/><path d="M${wx - wr * 0.5},${wy + wr * 0.25} q${wr * 0.12},-${wr * 0.12} ${wr * 0.26},0" fill="none" stroke="#2f6db5" stroke-width="8"/>`;
-                const px = W * (vertical ? 0.1 : 0.42), pw = W * (vertical ? 0.8 : 0.5);
+                const px = W * (vertical ? 0.7 : 0.42), pw = W * (vertical ? 0.29 : 0.5);
                 svg += `<path d="M${px},${gy + 40} L${px + 40},${gy - 120} L${px + pw - 40},${gy - 120} L${px + pw},${gy + 40} Z" fill="#9aa3b5" stroke="${INK}" stroke-width="6"/>`;
                 for (let i = 0; i < 10; i++) svg += `<circle cx="${px + 70 + i * ((pw - 140) / 9)}" cy="${gy - 70 + (i % 2) * 40}" r="13" fill="${['#ff6b6b', '#7cff9b', '#ffd166', '#7cc8ff'][i % 4]}" stroke="${INK}" stroke-width="4"/>`;
                 svg += `<rect width="${W}" height="${H}" fill="#7cff9b" opacity="0.06"/>`;
                 break;
               }
               case 'corral':
-                svg += fence(W * 0.38, W, gy + 90, '#9a6b44') + adobe(W * 0.78, gy, 0.6, '#c98f5e', glow);
+                svg += fence(W * (vertical ? 0.72 : 0.38), W, gy + 90, '#9a6b44') + adobe(W * 0.86, gy, 0.6, '#c98f5e', glow);
                 if (!cosas.has('caballo') && !cosas.has('vaca')) cosas.add('vaca');
                 break;
               case 'pueblo':
-                svg += adobe(W * 0.42, gy + 10, 0.8 * sc, '#c98f5e', glow) + adobe(W * 0.66, gy + 20, 0.9 * sc, '#d9a87a', glow) + chapel(W * 0.93, gy + 10, 0.8, glow);
+                svg += vertical
+                  ? adobe(W * 0.12, gy + 10, 0.7, '#c98f5e', glow) + adobe(W * 0.8, gy + 20, 0.75, '#d9a87a', glow) + chapel(W * 0.96, gy + 10, 0.7, glow)
+                  : adobe(W * 0.42, gy + 10, 0.8 * sc, '#c98f5e', glow) + adobe(W * 0.66, gy + 20, 0.9 * sc, '#d9a87a', glow) + chapel(W * 0.93, gy + 10, 0.8, glow);
                 break;
               default: // rancho
                 svg += adobe(cx - 40, gy + 30, 1.1 * sc, '#c98f5e', glow) + fence(W * 0.82, W, gy + 100, '#9a6b44') + nopal(W * 0.42, gy + 70, 1, plant);
             }
+            if (bare) return svg + '</svg>';
             // Cosas
             const spot = () => [vertical ? (r() < 0.5 ? R(W * 0.08, W * 0.22) : R(W * 0.78, W * 0.92)) : R(W * 0.42, W * 0.95), gy + R(80, 200)]; // en vertical, a los lados de Don Chito
             if (cosas.has('fogata') && lugar !== 'fogata') svg += campfire(...spot(), 1);
@@ -559,7 +573,7 @@ jobs:
                 svg += {olla: pot, comal, cazuela, carne: meat, chiles, cebolla: onion, ajo: garlic, tortillas, plato: dish}[c](x, y, big);
               });
             }
-            if (cosas.has('huellas')) for (let i = 0; i < 6; i++) svg += `<ellipse cx="${W * 0.5 + i * 60}" cy="${gy + 200 - i * 18}" rx="12" ry="7" fill="${INK}" opacity="0.5"/>`;
+            if (cosas.has('huellas')) for (let i = 0; i < 6; i++) svg += `<ellipse cx="${W * (vertical ? 0.72 : 0.5) + i * (vertical ? 40 : 60)}" cy="${gy + 200 - i * 18}" rx="12" ry="7" fill="${INK}" opacity="0.5"/>`;
 
             // Personajes de la escena (aspecto fijo del cast), del centro a la derecha
             const people = (Array.isArray(set.personajes) ? set.personajes : []).slice(0, 4);
@@ -603,13 +617,51 @@ jobs:
             return {set, cast};
           }
 
+          /** Zona donde Remotion dibuja a Don Chito (en el lienzo del fondo). */
+          const CHITO_BOX = {v: {x0: 0.32, x1: 0.68, y0: 920 / 1920, y1: 1800 / 1920}, h: {x0: 110 / 1920, x1: 500 / 1920, y0: 300 / 1080, y1: 1060 / 1080}};
+          /** Pasa un SVG a pixeles grises chiquitos (1/4) para comparar. */
+          function grayPixels(svgFile, w, h) {
+            return execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', svgFile, '-vf', `scale=${w / 4}:${h / 4},format=gray`, '-frames:v', '1', '-f', 'rawvideo', '-'], {maxBuffer: 64e6});
+          }
+          /** Qué parte de la zona de Don Chito tapa algo del dibujo (0 a 1), comparando contra el fondo vacío. */
+          function overlapRatio(full, bare, w, h, vertical) {
+            const b = vertical ? CHITO_BOX.v : CHITO_BOX.h, W = w / 4, H = h / 4;
+            const x0 = Math.round(b.x0 * W), x1 = Math.round(b.x1 * W), y0 = Math.round(b.y0 * H), y1 = Math.round(b.y1 * H);
+            let n = 0, hit = 0;
+            for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { n++; if (Math.abs(full[y * W + x] - bare[y * W + x]) > 28) hit++; }
+            return n ? hit / n : 0;
+          }
+          const overlapIssues = new Map(); // id del proyecto -> escenas con algo detrás de Don Chito
           function codeBackground(p, i, vertical) {
             const dir = join(WORK, p.id + '-bg');
             mkdirSync(dir, {recursive: true});
             const wt = withTacha(p, animalsAsThings(p.scenes[i].set || {}));
-            const svg = sceneSVG(wt.set, wt.cast, {w: vertical ? 1080 : 1920, h: vertical ? 1920 : 1080, t: i, horror: isHorrorTopic(p.topic)});
+            const w = vertical ? 1080 : 1920, h = vertical ? 1920 : 1080, horror = isHorrorTopic(p.topic);
             const src = join(dir, `bg-${i}${vertical ? '-v' : ''}.svg`), out = src.replace(/\.svg$/, '.png');
-            writeFileSync(src, svg);
+            // Revisión de calidad: que nada quede detrás de Don Chito. Se prueban acomodos distintos y se queda el más limpio.
+            const bareFile = src.replace(/\.svg$/, '-bare.svg');
+            writeFileSync(bareFile, sceneSVG(wt.set, wt.cast, {w, h, t: i, horror, bare: true}));
+            let best = null;
+            try {
+              const bare = grayPixels(bareFile, w, h);
+              for (let k = 0; k < 5; k++) {
+                const svg = sceneSVG(wt.set, wt.cast, {w, h, t: i + k * 97, horror});
+                writeFileSync(src, svg);
+                const ratio = overlapRatio(grayPixels(src, w, h), bare, w, h, vertical);
+                if (!best || ratio < best.ratio) best = {svg, ratio};
+                if (ratio < 0.03) break;
+              }
+            } catch (e) {
+              log('Revisión de fondo no disponible: ' + String(e.message).slice(0, 80));
+            }
+            if (!best) best = {svg: sceneSVG(wt.set, wt.cast, {w, h, t: i, horror}), ratio: 0};
+            const key = p.id + (vertical ? '-v' : '');
+            const set = overlapIssues.get(key) || new Set();
+            // El rayo del ovni sobre Don Chito es parte de la historia: no cuenta como encimado.
+            const ovni = (wt.set.cosas || []).includes('ovni');
+            if (best.ratio >= 0.06 && !ovni) set.add(i + 1); else set.delete(i + 1);
+            overlapIssues.set(key, set);
+            writeFileSync(src, best.svg);
             ff(['-i', src, '-frames:v', '1', out]);
             return out;
           }
@@ -680,8 +732,23 @@ jobs:
             }
             done++;
             await step('render', 'editando con Remotion');
-            const job = await api('render', {id});
-            const {file, durations} = await renderRemotion(job);
+            let job = await api('render', {id});
+            let {file, durations, badVoice} = await renderRemotion(job);
+            // Revisión automática de la voz: si una escena salió con huecos o cortada, se vuelve a grabar y se arma otra vez (una sola vez).
+            if (badVoice.length) {
+              log('Revisión: voz con problemas en ' + badVoice.map((b) => `escena ${b.i + 1} (${b.why})`).join(', ') + '. Se vuelve a grabar.');
+              for (const b of badVoice) p = await edgeVoice(p, b.i, {rate: '-5%', pitch: '-2Hz'});
+              await step('render', 'volviendo a editar (voz corregida)');
+              job = await api('render', {id});
+              ({file, durations, badVoice} = await renderRemotion(job));
+            }
+            const issues = [];
+            if (badVoice.length) issues.push('voz rara en escena ' + badVoice.map((b) => b.i + 1).join(', '));
+            const behind = [...(overlapIssues.get(p.id + (p.format === 'Short' ? '-v' : '')) || [])];
+            if (behind.length) issues.push('algo queda detrás de Don Chito en escena ' + behind.join(', '));
+            issues.push(...textIssues(p));
+            const review = issues.length ? '⚠ Revisión: ' + issues.join('; ') : '✔ Revisión automática: todo bien';
+            log(review);
             log('Video armado: ' + (statSync(file).size / 1e6).toFixed(1) + ' MB');
             const r = await request('video', {
               method: 'POST',
@@ -690,7 +757,7 @@ jobs:
             });
             const result = await r.json().catch(() => ({}));
             if (!r.ok) throw Error(result.error || 'La app no aceptó el video');
-            await api('production-state', {id, progress: {stage: 'complete', message: 'Don Chito · listo para tu aprobación', total: p.scenes.length, done: steps(), steps: steps(), status: 'complete'}}).catch(() => {});
+            await api('production-state', {id, progress: {stage: 'complete', message: 'Don Chito · listo para tu aprobación · ' + review, total: p.scenes.length, done: steps(), steps: steps(), status: 'complete'}}).catch(() => {});
 
             // Del video largo salen 3 Shorts (mismas imágenes y voz, sin gastar IA).
             if (p.format !== 'Short') {
@@ -726,7 +793,7 @@ jobs:
           "package.json": "{\n  \"name\": \"donchito-remotion\",\n  \"private\": true,\n  \"dependencies\": {\n    \"@remotion/cli\": \"4.0.528\",\n    \"remotion\": \"4.0.528\",\n    \"react\": \"19.2.0\",\n    \"react-dom\": \"19.2.0\"\n  }\n}\n",
           "src/index.ts": "import {registerRoot} from 'remotion';\nimport {RemotionRoot} from './Root';\nregisterRoot(RemotionRoot);\n",
           "src/Root.tsx": "import React from 'react';\nimport {Composition, CalculateMetadataFunction} from 'remotion';\nimport {DonChito, Props} from './DonChito';\n\nconst calc: CalculateMetadataFunction<Props> = ({props}) => ({\n  durationInFrames: Math.max(30, props.scenes.reduce((a, s) => a + s.frames, 0)),\n  width: props.format === 'Short' ? 1080 : 1920,\n  height: props.format === 'Short' ? 1920 : 1080,\n});\n\nexport const RemotionRoot: React.FC = () => (\n  <Composition\n    id=\"DonChito\"\n    component={DonChito}\n    durationInFrames={300}\n    fps={30}\n    width={1920}\n    height={1080}\n    defaultProps={{format: 'Video largo', hook: '', badge: 'DON CHITO', outro: '', scenes: []} as Props}\n    calculateMetadata={calc}\n  />\n);\n",
-          "src/DonChito.tsx": "import React, {useMemo} from 'react';\nimport {AbsoluteFill, Img, Sequence, staticFile, useCurrentFrame, useVideoConfig, interpolate, Easing} from 'remotion';\nimport {Chito, Pose} from './Chito';\n\nexport type Word = {t: number; w: string};\nexport type SceneP = {img: string; frames: number; text: string; words?: Word[] | null; pose?: Pose};\nexport type Props = {format: string; hook: string; badge: string; outro: string; scenes: SceneP[]};\n\nconst FONT = 'Montserrat, \"DejaVu Sans\", Arial, sans-serif';\nconst PAPER = '#f3e7cf';\nconst INK = '#2a1b10';\nconst YELLOW = '#ffd23f';\nconst RED = '#b23a26';\nconst clamp = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;\n\ntype Group = {start: number; end: number; words: Word[]};\n\nfunction groupsFor(s: SceneP, fps: number, vertical: boolean): Group[] {\n  const total = s.frames / fps;\n  let words: Word[] = (s.words || []).filter((x) => x && x.w);\n  if (!words.length) {\n    // Sin tiempos de palabra: se reparten según el largo de cada palabra.\n    const list = s.text.split(/\\s+/).filter(Boolean);\n    const chars = list.reduce((a, w) => a + w.length + 1, 0) || 1;\n    let acc = 0;\n    words = list.map((w) => {\n      const t = (acc / chars) * Math.max(0.5, total - 0.35);\n      acc += w.length + 1;\n      return {t, w};\n    });\n  }\n  const per = vertical ? 3 : 5;\n  const chunks: Word[][] = [];\n  for (let i = 0; i < words.length; i += per) chunks.push(words.slice(i, i + per));\n  if (chunks.length > 1 && chunks[chunks.length - 1].length === 1) chunks[chunks.length - 2].push(...chunks.pop()!);\n  return chunks.map((c, k) => ({start: c[0].t, end: k + 1 < chunks.length ? chunks[k + 1][0].t : total, words: c}));\n}\n\nconst Captions: React.FC<{s: SceneP; vertical: boolean}> = ({s, vertical}) => {\n  const frame = useCurrentFrame();\n  const {fps} = useVideoConfig();\n  const groups = useMemo(() => groupsFor(s, fps, vertical), [s, fps, vertical]);\n  const t = frame / fps;\n  const g = groups.find((x) => t >= x.start && t < x.end);\n  if (!g) return null;\n  const local = (t - g.start) * fps;\n  let current = 0;\n  g.words.forEach((w, i) => {\n    if (w.t <= t) current = i;\n  });\n  return (\n    <AbsoluteFill style={{justifyContent: 'flex-end', alignItems: 'center', paddingBottom: vertical ? 1010 : 70}}>\n      <div\n        style={{\n          maxWidth: vertical ? 940 : 1640,\n          textAlign: 'center',\n          fontFamily: FONT,\n          fontWeight: 900,\n          fontSize: vertical ? 82 : 62,\n          lineHeight: 1.12,\n          color: 'white',\n          textTransform: 'uppercase',\n          WebkitTextStroke: (vertical ? 14 : 9) + 'px ' + INK,\n          paintOrder: 'stroke fill',\n          textShadow: '0 6px 0 rgba(0,0,0,0.35)',\n          scale: String(interpolate(local, [0, 4], [0.86, 1], {...clamp, easing: Easing.out(Easing.back(2))})),\n        }}\n      >\n        {g.words.map((w, i) => (\n          <span key={i} style={{color: i === current ? YELLOW : 'white', display: 'inline-block', margin: '0 0.24em', scale: i === current ? '1.08' : '1'}}>\n            {w.w}\n          </span>\n        ))}\n      </div>\n    </AbsoluteFill>\n  );\n};\n\n/** Don Chito encima del fondo: habla mientras suena la voz de la escena. */\nconst ChitoLayer: React.FC<{s: SceneP; vertical: boolean}> = ({s, vertical}) => {\n  const frame = useCurrentFrame();\n  const {fps, height} = useVideoConfig();\n  const t = frame / fps;\n  const words = s.words || [];\n  const end = words.length ? words[words.length - 1].t + 0.45 : s.frames / fps - 0.35;\n  const talking = t > 0.08 && t < end;\n  const enter = interpolate(frame, [0, 8], [0.9, 1], {...clamp, easing: Easing.out(Easing.back(2))});\n  return (\n    <AbsoluteFill style={{justifyContent: 'flex-end', alignItems: vertical ? 'center' : 'flex-start', paddingLeft: vertical ? 0 : 70, paddingBottom: vertical ? 120 : 10}}>\n      <div style={{scale: String(enter), transformOrigin: 'bottom center'}}>\n        <Chito pose={s.pose || 'habla'} frame={frame} talking={talking} height={Math.round(height * (vertical ? 0.46 : 0.74))} />\n      </div>\n    </AbsoluteFill>\n  );\n};\n\nconst SceneView: React.FC<{s: SceneP; i: number; vertical: boolean}> = ({s, i, vertical}) => {\n  const frame = useCurrentFrame();\n  const zoomIn = i % 2 === 0;\n  const base = interpolate(frame, [0, s.frames], zoomIn ? [1.03, 1.13] : [1.13, 1.03], clamp);\n  // Pequeño \"golpe\" de entrada en cada corte para darle ritmo.\n  const pop = interpolate(frame, [0, 7], [0.05, 0], {...clamp, easing: Easing.out(Easing.cubic)});\n  const pan = i % 3 === 0 ? [-1.6, 1.6] : i % 3 === 1 ? [1.6, -1.6] : [0, 0];\n  const x = interpolate(frame, [0, s.frames], pan, clamp);\n  return (\n    <AbsoluteFill style={{backgroundColor: PAPER, overflow: 'hidden'}}>\n      <Img\n        src={staticFile(s.img)}\n        style={{\n          position: 'absolute',\n          inset: 0,\n          width: '100%',\n          height: '100%',\n          objectFit: 'cover',\n          objectPosition: '50% 46%',\n          scale: String(base + pop),\n          translate: `${x}% 0%`,\n        }}\n      />\n      <AbsoluteFill style={{background: 'radial-gradient(ellipse at center, rgba(0,0,0,0) 60%, rgba(60,35,15,0.28) 100%)'}} />\n      <ChitoLayer s={s} vertical={vertical} />\n      <Captions s={s} vertical={vertical} />\n    </AbsoluteFill>\n  );\n};\n\nconst Hook: React.FC<{text: string; vertical: boolean}> = ({text, vertical}) => {\n  const frame = useCurrentFrame();\n  const {fps} = useVideoConfig();\n  const inS = interpolate(frame, [0, 8], [0.6, 1], {...clamp, easing: Easing.out(Easing.back(2.2))});\n  const out = interpolate(frame, [2.3 * fps, 2.7 * fps], [1, 0], clamp);\n  return (\n    <AbsoluteFill style={{justifyContent: 'flex-start', alignItems: 'center', paddingTop: vertical ? 210 : 60, opacity: out}}>\n      <div\n        style={{\n          background: RED,\n          color: '#fff6e6',\n          fontFamily: FONT,\n          fontWeight: 900,\n          fontSize: vertical ? 84 : 62,\n          lineHeight: 1.05,\n          textTransform: 'uppercase',\n          padding: vertical ? '26px 40px' : '20px 44px',\n          borderRadius: 22,\n          border: `8px solid ${INK}`,\n          boxShadow: `0 12px 0 ${INK}`,\n          maxWidth: vertical ? 960 : 1300,\n          textAlign: 'center',\n          rotate: '-2deg',\n          scale: String(inS),\n        }}\n      >\n        {text}\n      </div>\n    </AbsoluteFill>\n  );\n};\n\nconst Badge: React.FC<{text: string; vertical: boolean}> = ({text, vertical}) => (\n  <AbsoluteFill style={{justifyContent: 'flex-start', alignItems: vertical ? 'center' : 'flex-start', padding: vertical ? '120px 0 0' : '34px 40px'}}>\n    <div\n      style={{\n        background: INK,\n        color: PAPER,\n        fontFamily: FONT,\n        fontWeight: 900,\n        letterSpacing: 3,\n        fontSize: vertical ? 40 : 30,\n        padding: '10px 22px',\n        borderRadius: 999,\n        opacity: 0.88,\n      }}\n    >\n      {text}\n    </div>\n  </AbsoluteFill>\n);\n\nconst Outro: React.FC<{text: string; vertical: boolean}> = ({text, vertical}) => {\n  const frame = useCurrentFrame();\n  const y = interpolate(frame, [0, 9], [80, 0], {...clamp, easing: Easing.out(Easing.cubic)});\n  return (\n    <AbsoluteFill style={{justifyContent: 'flex-start', alignItems: 'center', paddingTop: vertical ? 210 : 60}}>\n      <div\n        style={{\n          background: YELLOW,\n          color: INK,\n          fontFamily: FONT,\n          fontWeight: 900,\n          fontSize: vertical ? 70 : 60,\n          padding: '22px 40px',\n          borderRadius: 20,\n          border: `7px solid ${INK}`,\n          translate: `0px ${y}px`,\n          textAlign: 'center',\n          maxWidth: vertical ? 900 : 1400,\n        }}\n      >\n        {text}\n      </div>\n    </AbsoluteFill>\n  );\n};\n\nexport const DonChito: React.FC<Props> = (props) => {\n  const {fps, width, height, durationInFrames} = useVideoConfig();\n  const vertical = height > width;\n  let from = 0;\n  return (\n    <AbsoluteFill style={{backgroundColor: PAPER}}>\n      {props.scenes.map((s, i) => {\n        const at = from;\n        from += s.frames;\n        return (\n          <Sequence key={i} from={at} durationInFrames={s.frames}>\n            <SceneView s={s} i={i} vertical={vertical} />\n          </Sequence>\n        );\n      })}\n      {props.badge ? <Badge text={props.badge} vertical={vertical} /> : null}\n      {props.hook ? (\n        <Sequence from={0} durationInFrames={Math.round(2.7 * fps)}>\n          <Hook text={props.hook} vertical={vertical} />\n        </Sequence>\n      ) : null}\n      {props.outro ? (\n        <Sequence from={Math.max(0, durationInFrames - Math.round(2.4 * fps))}>\n          <Outro text={props.outro} vertical={vertical} />\n        </Sequence>\n      ) : null}\n    </AbsoluteFill>\n  );\n};\n",
+          "src/DonChito.tsx": "import React, {useMemo} from 'react';\nimport {AbsoluteFill, Img, Sequence, staticFile, useCurrentFrame, useVideoConfig, interpolate, Easing} from 'remotion';\nimport {Chito, Pose} from './Chito';\n\nexport type Word = {t: number; w: string};\nexport type SceneP = {img: string; frames: number; text: string; words?: Word[] | null; pose?: Pose};\nexport type Props = {format: string; hook: string; badge: string; outro: string; scenes: SceneP[]};\n\nconst FONT = 'Montserrat, \"DejaVu Sans\", Arial, sans-serif';\nconst PAPER = '#f3e7cf';\nconst INK = '#2a1b10';\nconst YELLOW = '#ffd23f';\nconst RED = '#b23a26';\nconst clamp = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;\n\ntype Group = {start: number; end: number; words: Word[]};\n\nfunction groupsFor(s: SceneP, fps: number, vertical: boolean): Group[] {\n  const total = s.frames / fps;\n  let words: Word[] = (s.words || []).filter((x) => x && x.w);\n  if (!words.length) {\n    // Sin tiempos de palabra: se reparten según el largo de cada palabra.\n    const list = s.text.split(/\\s+/).filter(Boolean);\n    const chars = list.reduce((a, w) => a + w.length + 1, 0) || 1;\n    let acc = 0;\n    words = list.map((w) => {\n      const t = (acc / chars) * Math.max(0.5, total - 0.35);\n      acc += w.length + 1;\n      return {t, w};\n    });\n  }\n  const per = vertical ? 3 : 5;\n  const chunks: Word[][] = [];\n  for (let i = 0; i < words.length; i += per) chunks.push(words.slice(i, i + per));\n  if (chunks.length > 1 && chunks[chunks.length - 1].length === 1) chunks[chunks.length - 2].push(...chunks.pop()!);\n  return chunks.map((c, k) => ({start: c[0].t, end: k + 1 < chunks.length ? chunks[k + 1][0].t : total, words: c}));\n}\n\nconst Captions: React.FC<{s: SceneP; vertical: boolean}> = ({s, vertical}) => {\n  const frame = useCurrentFrame();\n  const {fps} = useVideoConfig();\n  const groups = useMemo(() => groupsFor(s, fps, vertical), [s, fps, vertical]);\n  const t = frame / fps;\n  const g = groups.find((x) => t >= x.start && t < x.end);\n  if (!g) return null;\n  const local = (t - g.start) * fps;\n  let current = 0;\n  g.words.forEach((w, i) => {\n    if (w.t <= t) current = i;\n  });\n  return (\n    <AbsoluteFill style={{justifyContent: 'flex-end', alignItems: 'center', paddingBottom: vertical ? 1010 : 70}}>\n      <div\n        style={{\n          maxWidth: vertical ? 940 : 1640,\n          textAlign: 'center',\n          fontFamily: FONT,\n          fontWeight: 900,\n          fontSize: vertical ? 82 : 62,\n          lineHeight: 1.12,\n          color: 'white',\n          textTransform: 'uppercase',\n          WebkitTextStroke: (vertical ? 14 : 9) + 'px ' + INK,\n          paintOrder: 'stroke fill',\n          textShadow: '0 6px 0 rgba(0,0,0,0.35)',\n          scale: String(interpolate(local, [0, 4], [0.86, 1], {...clamp, easing: Easing.out(Easing.back(2))})),\n        }}\n      >\n        {g.words.map((w, i) => {\n          // La palabra que se está diciendo \"brinca\": crece rápido y se asienta (estilo subtítulos de TikTok).\n          const since = (t - w.t) * fps;\n          const active = i === current;\n          const pop = active ? interpolate(since, [0, 3, 8], [1.28, 1.16, 1.1], clamp) : 1;\n          const lift = active ? interpolate(since, [0, 3, 8], [-10, -4, 0], clamp) : 0;\n          const said = w.t <= t;\n          return (\n            <span\n              key={i}\n              style={{\n                color: active ? YELLOW : 'white',\n                opacity: said || i <= current + 1 ? 1 : 0.85,\n                display: 'inline-block',\n                margin: '0 0.22em',\n                scale: String(pop),\n                translate: `0px ${lift}px`,\n              }}\n            >\n              {w.w}\n            </span>\n          );\n        })}\n      </div>\n    </AbsoluteFill>\n  );\n};\n\n/** Don Chito encima del fondo: habla mientras suena la voz de la escena. */\nconst ChitoLayer: React.FC<{s: SceneP; vertical: boolean}> = ({s, vertical}) => {\n  const frame = useCurrentFrame();\n  const {fps, height} = useVideoConfig();\n  const t = frame / fps;\n  const words = s.words || [];\n  const end = words.length ? words[words.length - 1].t + 0.45 : s.frames / fps - 0.35;\n  const talking = t > 0.08 && t < end;\n  const enter = interpolate(frame, [0, 8], [0.9, 1], {...clamp, easing: Easing.out(Easing.back(2))});\n  return (\n    <AbsoluteFill style={{justifyContent: 'flex-end', alignItems: vertical ? 'center' : 'flex-start', paddingLeft: vertical ? 0 : 70, paddingBottom: vertical ? 120 : 10}}>\n      <div style={{scale: String(enter), transformOrigin: 'bottom center'}}>\n        <Chito pose={s.pose || 'habla'} frame={frame} talking={talking} height={Math.round(height * (vertical ? 0.46 : 0.74))} />\n      </div>\n    </AbsoluteFill>\n  );\n};\n\nconst SceneView: React.FC<{s: SceneP; i: number; vertical: boolean}> = ({s, i, vertical}) => {\n  const frame = useCurrentFrame();\n  const zoomIn = i % 2 === 0;\n  const base = interpolate(frame, [0, s.frames], zoomIn ? [1.03, 1.13] : [1.13, 1.03], clamp);\n  // Pequeño \"golpe\" de entrada en cada corte para darle ritmo.\n  const pop = interpolate(frame, [0, 7], [0.05, 0], {...clamp, easing: Easing.out(Easing.cubic)});\n  const pan = i % 3 === 0 ? [-1.6, 1.6] : i % 3 === 1 ? [1.6, -1.6] : [0, 0];\n  const x = interpolate(frame, [0, s.frames], pan, clamp);\n  return (\n    <AbsoluteFill style={{backgroundColor: PAPER, overflow: 'hidden'}}>\n      <Img\n        src={staticFile(s.img)}\n        style={{\n          position: 'absolute',\n          inset: 0,\n          width: '100%',\n          height: '100%',\n          objectFit: 'cover',\n          objectPosition: '50% 46%',\n          scale: String(base + pop),\n          translate: `${x}% 0%`,\n        }}\n      />\n      <AbsoluteFill style={{background: 'radial-gradient(ellipse at center, rgba(0,0,0,0) 60%, rgba(60,35,15,0.28) 100%)'}} />\n      <ChitoLayer s={s} vertical={vertical} />\n      <Captions s={s} vertical={vertical} />\n    </AbsoluteFill>\n  );\n};\n\nconst Hook: React.FC<{text: string; vertical: boolean}> = ({text, vertical}) => {\n  const frame = useCurrentFrame();\n  const {fps} = useVideoConfig();\n  const inS = interpolate(frame, [0, 8], [0.6, 1], {...clamp, easing: Easing.out(Easing.back(2.2))});\n  const out = interpolate(frame, [2.3 * fps, 2.7 * fps], [1, 0], clamp);\n  return (\n    <AbsoluteFill style={{justifyContent: 'flex-start', alignItems: 'center', paddingTop: vertical ? 210 : 60, opacity: out}}>\n      <div\n        style={{\n          background: RED,\n          color: '#fff6e6',\n          fontFamily: FONT,\n          fontWeight: 900,\n          fontSize: vertical ? 84 : 62,\n          lineHeight: 1.05,\n          textTransform: 'uppercase',\n          padding: vertical ? '26px 40px' : '20px 44px',\n          borderRadius: 22,\n          border: `8px solid ${INK}`,\n          boxShadow: `0 12px 0 ${INK}`,\n          maxWidth: vertical ? 960 : 1300,\n          textAlign: 'center',\n          rotate: '-2deg',\n          scale: String(inS),\n        }}\n      >\n        {text}\n      </div>\n    </AbsoluteFill>\n  );\n};\n\nconst Badge: React.FC<{text: string; vertical: boolean}> = ({text, vertical}) => (\n  <AbsoluteFill style={{justifyContent: 'flex-start', alignItems: vertical ? 'center' : 'flex-start', padding: vertical ? '120px 0 0' : '34px 40px'}}>\n    <div\n      style={{\n        background: INK,\n        color: PAPER,\n        fontFamily: FONT,\n        fontWeight: 900,\n        letterSpacing: 3,\n        fontSize: vertical ? 40 : 30,\n        padding: '10px 22px',\n        borderRadius: 999,\n        opacity: 0.88,\n      }}\n    >\n      {text}\n    </div>\n  </AbsoluteFill>\n);\n\nconst Outro: React.FC<{text: string; vertical: boolean}> = ({text, vertical}) => {\n  const frame = useCurrentFrame();\n  const y = interpolate(frame, [0, 9], [80, 0], {...clamp, easing: Easing.out(Easing.cubic)});\n  return (\n    <AbsoluteFill style={{justifyContent: 'flex-start', alignItems: 'center', paddingTop: vertical ? 210 : 60}}>\n      <div\n        style={{\n          background: YELLOW,\n          color: INK,\n          fontFamily: FONT,\n          fontWeight: 900,\n          fontSize: vertical ? 70 : 60,\n          padding: '22px 40px',\n          borderRadius: 20,\n          border: `7px solid ${INK}`,\n          translate: `0px ${y}px`,\n          textAlign: 'center',\n          maxWidth: vertical ? 900 : 1400,\n        }}\n      >\n        {text}\n      </div>\n    </AbsoluteFill>\n  );\n};\n\nexport const DonChito: React.FC<Props> = (props) => {\n  const {fps, width, height, durationInFrames} = useVideoConfig();\n  const vertical = height > width;\n  let from = 0;\n  return (\n    <AbsoluteFill style={{backgroundColor: PAPER}}>\n      {props.scenes.map((s, i) => {\n        const at = from;\n        from += s.frames;\n        return (\n          <Sequence key={i} from={at} durationInFrames={s.frames}>\n            <SceneView s={s} i={i} vertical={vertical} />\n          </Sequence>\n        );\n      })}\n      {props.badge ? <Badge text={props.badge} vertical={vertical} /> : null}\n      {props.hook ? (\n        <Sequence from={0} durationInFrames={Math.round(2.7 * fps)}>\n          <Hook text={props.hook} vertical={vertical} />\n        </Sequence>\n      ) : null}\n      {props.outro ? (\n        <Sequence from={Math.max(0, durationInFrames - Math.round(2.4 * fps))}>\n          <Outro text={props.outro} vertical={vertical} />\n        </Sequence>\n      ) : null}\n    </AbsoluteFill>\n  );\n};\n",
           "src/Chito.tsx": "import React from 'react';\n\n// Don Chito dibujado con código: bolita, palitos, sombrero, bigote y paliacate.\n// Siempre sale igual, parpadea, mueve la boca cuando habla y cambia de pose en cada escena.\nexport type Pose = 'habla' | 'senala' | 'piensa' | 'sorprendido' | 'feliz' | 'triste' | 'trabaja' | 'camina';\nexport const POSES: Pose[] = ['habla', 'senala', 'piensa', 'sorprendido', 'feliz', 'triste', 'trabaja', 'camina'];\n\nconst INK = '#1f150d';\nconst STRAW = '#e9c46a';\nconst STRAW_DARK = '#c99a3c';\nconst RED = '#c0392b';\nconst W = 10; // grosor de línea\n\ntype P = [number, number];\nconst S: P = [200, 330]; // hombros\nconst HIP: P = [200, 480];\n\nfunction arms(pose: Pose, f: number): [P, P, P, P] {\n  const s = Math.sin(f / 5), s2 = Math.sin(f / 3.2);\n  switch (pose) {\n    case 'senala':\n      return [[160, 400], [150, 470], [285, 318], [372, 296 + 3 * s]];\n    case 'piensa':\n      return [[140, 385], [178, 425], [272, 385], [228, 272]];\n    case 'sorprendido':\n      return [[138, 272], [112 + 3 * s2, 188], [262, 272], [288 - 3 * s2, 188]];\n    case 'feliz':\n      return [[136, 285], [104, 206 + 10 * s], [264, 285], [296, 206 - 10 * s]];\n    case 'triste':\n      return [[178, 410], [176, 492], [222, 410], [224, 492]];\n    case 'trabaja':\n      return [[150, 385], [128, 440 + 22 * s2], [250, 385], [272, 440 - 22 * s2]];\n    case 'camina':\n      return [[175 + 12 * s, 405], [160 + 34 * s, 480], [225 - 12 * s, 405], [240 - 34 * s, 480]];\n    default: // habla: una mano explica, la otra abajo\n      return [[160, 400], [150, 472], [270, 352 + 6 * s], [312 + 8 * s, 300 + 14 * s]];\n  }\n}\n\nfunction legs(pose: Pose, f: number): [P, P] {\n  if (pose === 'camina') {\n    const s = Math.sin(f / 5) * 42;\n    return [[200 - s, 650], [200 + s, 650]];\n  }\n  if (pose === 'feliz' || pose === 'sorprendido') {\n    const hop = Math.max(0, Math.sin(f / 4)) * (pose === 'feliz' ? 10 : 0);\n    return [[150, 650 - hop], [250, 650 - hop]];\n  }\n  return [[155, 650], [245, 650]];\n}\n\nexport const Chito: React.FC<{pose: Pose; frame: number; talking: boolean; height: number}> = ({pose, frame, talking, height}) => {\n  const f = frame;\n  const bob = Math.sin(f / 9) * 4 + (pose === 'feliz' ? -Math.max(0, Math.sin(f / 4)) * 10 : 0);\n  const [le, lh, re, rh] = arms(pose, f);\n  const [lf, rf] = legs(pose, f);\n  const blink = f % 96 >= 90; // parpadeo\n  const open = talking ? 0.35 + 0.65 * Math.abs(Math.sin(f / 2.3)) : 0;\n  const big = pose === 'sorprendido';\n  const eyeR = big ? 11 : 8;\n  // Cejas según la emoción.\n  const brows: [P, P, P, P] =\n    pose === 'triste' ? [[160, 170], [186, 180], [214, 180], [240, 170]]\n    : pose === 'sorprendido' ? [[160, 160], [188, 154], [212, 154], [240, 160]]\n    : pose === 'piensa' ? [[160, 176], [188, 174], [212, 164], [240, 158]]\n    : pose === 'feliz' ? [[162, 172], [188, 168], [212, 168], [238, 172]]\n    : [[162, 176], [188, 174], [212, 174], [238, 176]];\n  const line = (a: P, b: P, c: P) => `M${a[0]},${a[1]} L${b[0]},${b[1]} L${c[0]},${c[1]}`;\n  let mouth: React.ReactNode;\n  if (talking) mouth = <ellipse cx={200} cy={246} rx={15} ry={3 + 11 * open} fill=\"#6b1d14\" stroke={INK} strokeWidth={5} />;\n  else if (pose === 'sorprendido') mouth = <ellipse cx={200} cy={250} rx={11} ry={13} fill=\"#6b1d14\" stroke={INK} strokeWidth={5} />;\n  else if (pose === 'triste') mouth = <path d=\"M184,254 Q200,240 216,254\" fill=\"none\" stroke={INK} strokeWidth={6} strokeLinecap=\"round\" />;\n  else mouth = <path d=\"M182,242 Q200,258 218,242\" fill=\"none\" stroke={INK} strokeWidth={6} strokeLinecap=\"round\" />;\n\n  return (\n    <svg viewBox=\"0 0 400 700\" style={{height, width: (height * 400) / 700, overflow: 'visible'}}>\n      <ellipse cx={200} cy={662} rx={110} ry={14} fill=\"rgba(0,0,0,0.18)\" />\n      <g transform={`translate(0 ${bob})`} strokeLinecap=\"round\" strokeLinejoin=\"round\">\n        {/* piernas y cuerpo */}\n        <path d={`M${lf[0]},${lf[1]} L${HIP[0]},${HIP[1]} L${rf[0]},${rf[1]}`} fill=\"none\" stroke={INK} strokeWidth={W} />\n        <path d={`M${lf[0]},${lf[1]} l-26,0 M${rf[0]},${rf[1]} l26,0`} stroke={INK} strokeWidth={W + 2} />\n        <line x1={200} y1={262} x2={HIP[0]} y2={HIP[1]} stroke={INK} strokeWidth={W} />\n        {/* brazos */}\n        <path d={line(S, le, lh)} fill=\"none\" stroke={INK} strokeWidth={W} />\n        <path d={line(S, re, rh)} fill=\"none\" stroke={INK} strokeWidth={W} />\n        <circle cx={lh[0]} cy={lh[1]} r={9} fill={INK} />\n        <circle cx={rh[0]} cy={rh[1]} r={9} fill={INK} />\n        {/* paliacate */}\n        <path d=\"M166,268 L234,268 L200,312 Z\" fill={RED} stroke={INK} strokeWidth={6} />\n        {/* cabeza */}\n        <circle cx={200} cy={192} r={76} fill=\"white\" stroke={INK} strokeWidth={W} />\n        {blink ? (\n          <>\n            <line x1={166} y1={190} x2={184} y2={190} stroke={INK} strokeWidth={6} />\n            <line x1={216} y1={190} x2={234} y2={190} stroke={INK} strokeWidth={6} />\n          </>\n        ) : (\n          <>\n            <circle cx={175} cy={190} r={eyeR} fill={INK} />\n            <circle cx={225} cy={190} r={eyeR} fill={INK} />\n            <circle cx={178} cy={187} r={2.6} fill=\"white\" />\n            <circle cx={228} cy={187} r={2.6} fill=\"white\" />\n          </>\n        )}\n        <path d={`M${brows[0][0]},${brows[0][1]} L${brows[1][0]},${brows[1][1]} M${brows[2][0]},${brows[2][1]} L${brows[3][0]},${brows[3][1]}`} stroke={INK} strokeWidth={7} />\n        {mouth}\n        {/* bigotazo */}\n        <path d=\"M200,222 C186,206 158,208 146,226 C142,236 150,244 158,236 C168,228 184,236 200,232 C216,236 232,228 242,236 C250,244 258,236 254,226 C242,208 214,206 200,222 Z\" fill={INK} />\n        {/* sombrero */}\n        <path d=\"M138,132 C134,64 160,40 200,40 C240,40 266,64 262,132 Z\" fill={STRAW} stroke={INK} strokeWidth={W} />\n        <path d=\"M140,108 L260,108 L262,128 L138,128 Z\" fill={RED} stroke={INK} strokeWidth={5} />\n        <ellipse cx={200} cy={134} rx={168} ry={26} fill={STRAW} stroke={INK} strokeWidth={W} />\n        <path d=\"M60,134 Q200,152 340,134\" fill=\"none\" stroke={STRAW_DARK} strokeWidth={5} />\n      </g>\n    </svg>\n  );\n};\n\n/** Elige la pose según lo que pasa en la escena (sin gastar IA). */\nexport function poseFor(text: string, visual: string, i: number, total: number): Pose {\n  const v = (visual + ' ' + text).toLowerCase();\n  if (i === total - 1) return 'feliz';\n  if (/point|señal|mira|look at|this is/.test(v)) return 'senala';\n  if (/think|wonder|piens|imagin|¿/.test(v) && i % 2 === 0) return 'piensa';\n  if (/surpris|shock|scared|asust|sorpren|increíble|!/.test(v)) return 'sorprendido';\n  if (/sad|worr|cry|trist|sequía|drought|sick|enferm|muri/.test(v)) return 'triste';\n  if (/walk|camin|travel|road|camino|ride|horse|caballo/.test(v)) return 'camina';\n  if (/work|milk|dig|hammer|cook|carry|plant|harvest|ordeñ|trabaj|cocin|siembr|cosech|cargar|build/.test(v)) return 'trabaja';\n  if (/happy|laugh|party|fiesta|feliz|celebr|boda|wedding/.test(v)) return 'feliz';\n  return i % 3 === 1 ? 'senala' : 'habla';\n}\n"
           };
           const KIT_DIR = process.env.REMOTION_DIR || join(WORK, 'remotion-kit');
@@ -752,7 +819,7 @@ jobs:
             const work = join(WORK, p.id);
             rmSync(work, {recursive: true, force: true});
             mkdirSync(work, {recursive: true});
-            const scenes = [], durations = [], segs = [];
+            const scenes = [], durations = [], segs = [], badVoice = [];
             for (let i = 0; i < p.scenes.length; i++) {
               const s = p.scenes[i];
               if (!s.image || !s.audio || s.audio.text !== s.text) throw Error(`A la escena ${i + 1} le falta imagen o voz`);
@@ -762,6 +829,8 @@ jobs:
                 writeFileSync(join(pub, `img-${i}.${ext}`), readFileSync(codeBackground(p, i, p.format === 'Short')));
               } else await download(s.image.url, join(pub, `img-${i}.${ext}`));
               const aud = s.audio.local || (await download(s.audio.url, join(work, `aud-${i}.mp3`)));
+              const v = voiceCheck(aud, s.text);
+              if (v) badVoice.push({i, why: v});
               const dur = Math.min(30, Math.max(1.5, probe(aud) + 0.3));
               const frames = Math.round(dur * FPS);
               durations.push(Math.round((frames / FPS) * 100) / 100);
@@ -798,7 +867,43 @@ jobs:
               file = smaller;
             }
             rmSync(pub, {recursive: true, force: true});
-            return {file, durations};
+            return {file, durations, badVoice};
+          }
+
+          /** Revisión de la voz de una escena: silencios largos a media frase o velocidad rara (voz cortada o trabada). */
+          function voiceCheck(file, text) {
+            try {
+              const dur = probe(file);
+              const r = spawnSync('ffmpeg', ['-hide_banner', '-i', file, '-af', 'silencedetect=noise=-38dB:d=1.3', '-f', 'null', '-'], {encoding: 'utf8', maxBuffer: 16e6});
+              const log = String(r.stderr || '');
+              const starts = [...log.matchAll(/silence_start: ([\d.]+)/g)].map((m) => Number(m[1]));
+              const ends = [...log.matchAll(/silence_end: ([\d.]+)/g)].map((m) => Number(m[1]));
+              const inner = starts.filter((st, k) => st > 0.4 && ends[k] !== undefined && ends[k] < dur - 0.5).length;
+              const tail = starts.length > ends.length ? dur - starts[starts.length - 1] : 0;
+              const speech = Math.max(0.3, dur - tail);
+              const cps = String(text || '').length / speech;
+              if (inner > 0) return 'silencio largo a media frase';
+              if (cps > 26) return 'voz demasiado rápida o cortada';
+              if (cps < 6) return 'voz demasiado lenta o con huecos';
+            } catch {}
+            return '';
+          }
+
+          /** Revisión del texto: frases repetidas o escenas que empiezan igual. */
+          function textIssues(p) {
+            const out = [];
+            const seen = new Map();
+            const norm = (x) => x.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9ñ ]/g, ' ').replace(/\s+/g, ' ').trim();
+            p.scenes.forEach((sc, i) => {
+              for (const f of String(sc.text || '').split(/[.!?]+/).map(norm).filter((f) => f.split(' ').length >= 4)) {
+                if (seen.has(f) && seen.get(f) !== i) out.push(`frase repetida en escenas ${seen.get(f) + 1} y ${i + 1}`);
+                else seen.set(f, i);
+              }
+              const a = norm(String(sc.text || '')).split(' ').slice(0, 3).join(' ');
+              const b = i > 0 ? norm(String(p.scenes[i - 1].text || '')).split(' ').slice(0, 3).join(' ') : '';
+              if (i > 0 && a && a === b) out.push(`escenas ${i} y ${i + 1} empiezan igual`);
+            });
+            return [...new Set(out)].slice(0, 4);
           }
 
           // ---------- Armado del video con ffmpeg ----------
