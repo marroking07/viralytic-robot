@@ -178,7 +178,9 @@ jobs:
                           continue
                       dur = v.get("duration") or 0
                       out.append({"id": vid, "url": f"https://kick.com/{slug}/videos/{vid}", "title": v.get("session_title") or v.get("title") or "",
-                                  "duration": round(dur / 1000) if dur > 100000 else dur, "date": v.get("start_time") or v.get("created_at") or "", "live": bool(v.get("is_live"))})
+                                  "duration": round(dur / 1000) if dur > 100000 else dur, "date": v.get("start_time") or v.get("created_at") or "", "live": bool(v.get("is_live")),
+                                  "cat": ", ".join([c.get("name", "") for c in (v.get("categories") or []) if isinstance(c, dict)]),
+                                  "views": (v.get("video") or {}).get("views") or v.get("views") or 0})
                   if out:
                       break
               except Exception as e:
