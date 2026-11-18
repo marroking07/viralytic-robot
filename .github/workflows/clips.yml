@@ -182,6 +182,58 @@ jobs:
           print(json.dumps({"videos": out, "error": "" if out else err}))
           `;
 
+          // Kick: yt-dlp falla con sus VODs (usa una API que ya no existe), así que se usa la API v1 y el m3u8 directo.
+          const KICK_VOD_PY = `
+          import sys, json
+          from urllib.parse import urljoin
+          from curl_cffi import requests
+          uuid = sys.argv[1]
+          r = requests.get(f"https://kick.com/api/v1/video/{uuid}", impersonate="chrome", timeout=40, headers={"Accept": "application/json"})
+          if r.status_code != 200:
+              print(json.dumps({"error": f"Kick respondió {r.status_code} al pedir el video"}))
+              sys.exit(0)
+          j = r.json()
+          ls = j.get("livestream") or {}
+          src = j.get("source") or ls.get("source")
+          out = {"source": src, "duration": round((ls.get("duration") or 0) / 1000), "title": ls.get("session_title") or "",
+                 "channel": (ls.get("channel") or {}).get("slug") or "", "live": bool(ls.get("is_live")), "variants": []}
+          if src:
+              m = requests.get(src, impersonate="chrome", timeout=40)
+              lines = m.text.splitlines()
+              for i, l in enumerate(lines):
+                  if l.startswith("#EXT-X-STREAM-INF"):
+                      bw = int((l.split("BANDWIDTH=")[1].split(",")[0]) if "BANDWIDTH=" in l else 0)
+                      h = int(l.split("RESOLUTION=")[1].split(",")[0].split("x")[1]) if "RESOLUTION=" in l else 0
+                      nxt = next((x for x in lines[i + 1:] if x and not x.startswith("#")), None)
+                      if nxt:
+                          out["variants"].append({"url": urljoin(src, nxt), "h": h, "bw": bw})
+          print(json.dumps(out))
+          `;
+          function kickVod(url) {
+            const uuid = (url.match(/\/videos?\/([0-9a-f-]{36})/i) || [])[1];
+            if (!uuid) return null;
+            const dir = join(WORK, 'py');
+            mkdirSync(dir, {recursive: true});
+            const py = join(dir, 'kickvod.py');
+            writeFileSync(py, KICK_VOD_PY);
+            const r = spawnSync('python3', [py, uuid], {encoding: 'utf8', timeout: 120000});
+            const j = JSON.parse((r.stdout || '').trim().split('\n').pop() || '{}');
+            if (j.error || !j.variants?.length) throw Error(j.error || 'Kick no dio el video (' + String(r.stderr || '').slice(-200) + ')');
+            if (j.live) throw Error('Ese stream sigue EN VIVO. Agrégalo cuando termine (el link del video guardado).');
+            const vs = j.variants.sort((a, b) => a.bw - b.bw);
+            const audio = vs[0];
+            const video = [...vs].reverse().find((v) => v.h && v.h <= 1080) || vs[vs.length - 1];
+            return {
+              duration: j.duration,
+              title: j.title,
+              creator: j.channel,
+              handle: j.channel ? '@' + j.channel : '',
+              audio: {url: audio.url},
+              video: {url: video.url, height: video.h, width: Math.round((video.h * 16) / 9)},
+              videoAudio: null,
+            };
+          }
+
           async function listSource(src) {
             const dir = join(WORK, 'py');
             mkdirSync(dir, {recursive: true});
@@ -247,6 +299,10 @@ jobs:
               }
               const duration = probe(file);
               return {duration, title: item.title, local: file, audio: {url: file}, video: {url: file}, videoAudio: null};
+            }
+            if (item.platform === 'kick') {
+              const k = kickVod(item.url);
+              if (k) return k;
             }
             const info = JSON.parse(ytdlp(['-J', '--no-playlist', item.url], 240000));
             if (info.is_live || info.live_status === 'is_live') throw Error('Ese stream sigue EN VIVO. Agrégalo cuando termine (el link del video guardado).');
