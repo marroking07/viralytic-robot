@@ -355,11 +355,14 @@ jobs:
               }
             }
             if (g.length) groups.push(g);
-            for (const grp of groups) {
-              for (let k = 0; k < grp.length; k++) {
-                const w = grp[k];
+            // Un solo renglón a la vez: cada palabra termina cuando empieza la siguiente (nunca se enciman dos grupos).
+            const flat = groups.flatMap((grp) => grp.map((w, k) => ({grp, k, w})));
+            for (let n = 0; n < flat.length; n++) {
+              const {grp, k, w} = flat[n];
+              {
                 const start = Math.max(0, w.s);
-                const end = Math.min(dur, k + 1 < grp.length ? grp[k + 1].s : Math.max(w.e, w.s + 0.25) + 0.15);
+                const nextStart = flat[n + 1] ? flat[n + 1].w.s : dur;
+                const end = Math.min(dur, nextStart, k + 1 < grp.length ? grp[k + 1].s : Math.max(w.e, w.s + 0.25) + 0.4);
                 if (end - start < 0.05) continue;
                 const text = grp
                   .map((x, j) => {
@@ -462,7 +465,8 @@ jobs:
             const handle = item.handle || src.handle || (item.creator ? '@' + item.creator.replace(/\s+/g, '') : '');
             const platform = PLATFORM[item.platform] || '';
             const credit = `Clip de ${handle || item.creator || 'su creador'}${platform ? ' · ' + platform : ''}`;
-            let cursor = item.cursor || 0;
+            // Streams largos: se salta el inicio (intro, saludos y espera) la primera vez.
+            let cursor = item.cursor || (src.duration > 3600 ? 600 : 0);
             while (made < need && windows < 4 && elapsedMin() < BUDGET_MIN) {
               const total = src.duration || 0;
               if (total && cursor >= total - 20) {
