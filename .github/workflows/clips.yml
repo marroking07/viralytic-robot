@@ -254,7 +254,9 @@ jobs:
           from concurrent.futures import ThreadPoolExecutor
           from curl_cffi import requests
           cid, start, a, b = sys.argv[1], sys.argv[2], int(float(sys.argv[3])), int(float(sys.argv[4]))
-          t0 = datetime.datetime.fromisoformat(start.replace(" ", "T").replace("Z", "") + "+00:00")
+          st = start.strip().replace(" ", "T").replace("Z", "")
+          st = st[:19]
+          t0 = datetime.datetime.fromisoformat(st).replace(tzinfo=datetime.timezone.utc)
           def iso(s):
               return (t0 + datetime.timedelta(seconds=s)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
           def rate(s):
