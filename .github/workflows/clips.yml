@@ -34,6 +34,11 @@ jobs:
           sudo apt-get install -y -qq fonts-montserrat > /dev/null || true
           pip install -q -U "yt-dlp[default,curl-cffi]" faster-whisper
           yt-dlp --version
+      - name: Instalar TwitchDownloaderCLI (chat de Twitch, gratis)
+        continue-on-error: true
+        run: |
+          URL=$(curl -s https://api.github.com/repos/lay295/TwitchDownloader/releases/latest | grep -o 'https://[^"]*CLI[^"]*Linux-x64[^"]*\.zip' | head -1)
+          curl -sL "$URL" -o tdcli.zip && unzip -o -q tdcli.zip -d tdcli && sudo install -m 755 tdcli/TwitchDownloaderCLI /usr/local/bin/TwitchDownloaderCLI && echo "TwitchDownloaderCLI listo"
       - name: Recordar el modelo de voz a texto entre corridas
         uses: actions/cache@v4
         with:
@@ -43,7 +48,7 @@ jobs:
         env:
           APP_URL: https://viralytic-ai.pll-studio.workers.dev
           WHISPER_MODEL: small
-          BUDGET_MIN: '45'
+          BUDGET_MIN: '50'
         run: |
           cat > clips.mjs <<'CLIPS_EOF'
           // Robot de CLIPS de Viralytic AI (corre en GitHub Actions, archivo .github/workflows/clips.yml).
@@ -202,7 +207,8 @@ jobs:
           ls = j.get("livestream") or {}
           src = j.get("source") or ls.get("source")
           out = {"source": src, "duration": round((ls.get("duration") or 0) / 1000), "title": ls.get("session_title") or "",
-                 "channel": (ls.get("channel") or {}).get("slug") or "", "live": bool(ls.get("is_live")), "variants": []}
+                 "channel": (ls.get("channel") or {}).get("slug") or "", "live": bool(ls.get("is_live")), "variants": [],
+                 "channel_id": ls.get("channel_id") or (ls.get("channel") or {}).get("id"), "start": ls.get("start_time") or ""}
           if src:
               m = requests.get(src, impersonate="chrome", timeout=40)
               lines = m.text.splitlines()
@@ -237,7 +243,192 @@ jobs:
               audio: {url: audio.url},
               video: {url: video.url, height: video.h, width: Math.round((video.h * 16) / 9)},
               videoAudio: null,
+              kick: {channelId: j.channel_id, start: j.start},
             };
+          }
+
+          // ---------- Chat de Kick: dónde explotó el chat (la gente reacciona a lo bueno) ----------
+          // Cada 10 s se pide el chat de ese momento (25 mensajes) y se mide qué tan rápido llegaron.
+          const KICK_CHAT_PY = `
+          import sys, json, datetime
+          from concurrent.futures import ThreadPoolExecutor
+          from curl_cffi import requests
+          cid, start, a, b = sys.argv[1], sys.argv[2], int(float(sys.argv[3])), int(float(sys.argv[4]))
+          t0 = datetime.datetime.fromisoformat(start.replace(" ", "T").replace("Z", "") + "+00:00")
+          def iso(s):
+              return (t0 + datetime.timedelta(seconds=s)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+          def rate(s):
+              for _ in range(2):
+                  try:
+                      r = requests.get(f"https://kick.com/api/v2/channels/{cid}/messages", params={"start_time": iso(s)}, impersonate="chrome", timeout=20)
+                      ms = (r.json().get("data") or {}).get("messages") or []
+                      ts = sorted(datetime.datetime.fromisoformat(m["created_at"].replace("Z", "+00:00")).timestamp() for m in ms if m.get("created_at"))
+                      if len(ts) < 2:
+                          return [s, 0.0]
+                      return [s, round(len(ts) / max(1.0, ts[-1] - ts[0]), 3)]
+                  except Exception:
+                      pass
+              return [s, 0.0]
+          with ThreadPoolExecutor(8) as ex:
+              out = list(ex.map(rate, range(a, b, 10)))
+          print(json.dumps(out))
+          `;
+          /** Picos del chat en [from, to]: [[segundo, veces más que lo normal]], los más fuertes primero. */
+          function kickHeat(src, from, to) {
+            try {
+              if (!src.kick?.channelId || !src.kick?.start) return [];
+              const py = join(WORK, 'py', 'kickchat.py');
+              mkdirSync(join(WORK, 'py'), {recursive: true});
+              writeFileSync(py, KICK_CHAT_PY);
+              const r = spawnSync('python3', [py, String(src.kick.channelId), src.kick.start, String(from), String(to)], {encoding: 'utf8', timeout: 6 * 60000});
+              const rows = JSON.parse((r.stdout || '').trim().split('\n').pop() || '[]').filter((x) => x[1] > 0);
+              if (rows.length < 10) return [];
+              const sorted = rows.map((x) => x[1]).sort((a, b) => a - b);
+              const median = sorted[Math.floor(sorted.length / 2)] || 1;
+              // Picos: al menos 2 veces lo normal, separados por 60 s.
+              const peaks = [];
+              for (const [t, v] of rows.slice().sort((a, b) => b[1] - a[1])) {
+                const x = v / median;
+                if (x < 2) break;
+                if (peaks.some((p) => Math.abs(p[0] - t) < 60)) continue;
+                peaks.push([t, Math.round(x * 10) / 10]);
+                if (peaks.length >= 12) break;
+              }
+              return peaks;
+            } catch (e) {
+              log('Chat: ' + e.message);
+              return [];
+            }
+          }
+
+          // ---------- Chat de Twitch: TwitchDownloaderCLI (gratis, código abierto) baja todo el chat del VOD ----------
+          function twitchHeatRows(item) {
+            const id = (item.url.match(/twitch\.tv\/videos\/(\d+)/) || [])[1];
+            if (!id) return [];
+            const out = join(WORK, 'chat-' + id + '.json');
+            if (!existsSync(out)) {
+              const r = spawnSync('TwitchDownloaderCLI', ['chatdownload', '--id', id, '-o', out, '--compression', 'None', '--collision', 'Overwrite'], {encoding: 'utf8', timeout: 10 * 60000});
+              if (r.status !== 0 || !existsSync(out)) {
+                log('Chat de Twitch: ' + String(r.stderr || r.error?.message || '').slice(-200));
+                return [];
+              }
+            }
+            const j = JSON.parse(readFileSync(out, 'utf8'));
+            const counts = new Map();
+            for (const c of j.comments || []) {
+              const b = Math.floor((c.content_offset_seconds || 0) / 10) * 10;
+              counts.set(b, (counts.get(b) || 0) + 1);
+            }
+            return [...counts.entries()].sort((a, b) => a[0] - b[0]).map(([t, n]) => [t, n / 10]);
+          }
+
+          /** Picos del chat en TODO el video: [[segundo, veces más que lo normal]], de mayor a menor. */
+          function chatPeaks(item, src) {
+            let rows = [];
+            if (src.kick?.channelId && src.duration) {
+              const py = join(WORK, 'py', 'kickchat.py');
+              mkdirSync(join(WORK, 'py'), {recursive: true});
+              writeFileSync(py, KICK_CHAT_PY.replace('range(a, b, 10)', 'range(a, b, 20)').replace('ThreadPoolExecutor(8)', 'ThreadPoolExecutor(12)'));
+              const r = spawnSync('python3', [py, String(src.kick.channelId), src.kick.start, '0', String(src.duration)], {encoding: 'utf8', timeout: 9 * 60000});
+              try {
+                rows = JSON.parse((r.stdout || '').trim().split('\n').pop() || '[]');
+              } catch {}
+            } else if (item.platform === 'twitch') rows = twitchHeatRows(item);
+            rows = rows.filter((x) => x[1] > 0);
+            if (rows.length < 20) return [];
+            // Promedio de 3 puntos para quitar ruido; lo "normal" es la mediana.
+            const sm = rows.map((x, i) => [x[0], (x[1] + (rows[i - 1]?.[1] ?? x[1]) + (rows[i + 1]?.[1] ?? x[1])) / 3]);
+            const sorted = sm.map((x) => x[1]).sort((a, b) => a - b);
+            const median = sorted[Math.floor(sorted.length / 2)] || 1;
+            const peaks = [];
+            for (const [t, v] of sm.slice().sort((a, b) => b[1] - a[1])) {
+              const x = v / median;
+              if (x < 1.8) break;
+              if (t < 600 || peaks.some((p) => Math.abs(p[0] - t) < 90)) continue;
+              peaks.push([t, Math.round(x * 10) / 10]);
+              if (peaks.length >= 40) break;
+            }
+            return peaks;
+          }
+
+          async function workPeaks(item, src, need, credit) {
+            log('Midiendo el chat de todo el stream…');
+            const tc = Date.now();
+            const all = chatPeaks(item, src);
+            if (!all.length) {
+              log('No hay chat que medir: se revisa por partes.');
+              return false;
+            }
+            const tried = new Set((item.tried || []).map(Number));
+            const used = item.used || [];
+            const fresh = all.filter(([t]) => !tried.has(t) && !used.some((u) => t > u[0] - 40 && t < u[1] + 40));
+            log(`Chat medido en ${Math.round((Date.now() - tc) / 1000)} s: ${all.length} picos, ${fresh.length} sin usar (el más fuerte: ${all[0][1]}x).`);
+            if (!fresh.length) {
+              await api('robot/clips-item', {id: item.id, finished: true});
+              log('Ya se usaron todos los picos de este stream.');
+              return true;
+            }
+            const take = fresh.slice(0, need - made + 3);
+            const dir = join(WORK, 'peaks-' + item.id.slice(0, 8));
+            mkdirSync(dir, {recursive: true});
+            // El chat reacciona DESPUÉS: se baja de 75 s antes a 25 s después de cada pico.
+            const wins = take.map(([t], i) => ({t, from: Math.max(0, t - 75), to: Math.min(src.duration || t + 25, t + 25), wav: join(dir, `p${i}.wav`), json: join(dir, `p${i}.json`)}));
+            for (const w of wins) {
+              try {
+                grabAudio(src, w.from, w.to, w.wav);
+              } catch (e) {
+                log('Audio de un pico: ' + e.message.slice(0, 160));
+              }
+            }
+            const ok = wins.filter((w) => existsSync(w.wav) && probe(w.wav) > 10);
+            if (!ok.length) return false;
+            log(`Transcribiendo ${ok.length} momentos (${Math.round(ok.reduce((a, w) => a + w.to - w.from, 0) / 60)} min) con faster-whisper (${WHISPER})…`);
+            const py = join(WORK, 'py', 'whisper.py');
+            mkdirSync(join(WORK, 'py'), {recursive: true});
+            writeFileSync(py, WHISPER_PY);
+            for (const w of ok) execFileSync('python3', [py, w.wav, w.json, WHISPER], {stdio: ['ignore', 'ignore', 'inherit'], timeout: 20 * 60000});
+            const segs = ok
+              .flatMap((w) => (existsSync(w.json) ? JSON.parse(readFileSync(w.json, 'utf8')) : []).map((x) => ({...x, s: x.s + w.from, e: x.e + w.from, w: x.w.map((y) => ({...y, s: y.s + w.from, e: y.e + w.from}))})))
+              .sort((a, b) => a.s - b.s);
+            await api('robot/clips-item', {id: item.id, tried: take.map((x) => x[0])});
+            if (segs.length < 3) return true;
+            const {moments = []} = await api('robot/clips-pick', {id: item.id, mode: 'peaks', from: ok[0].from, to: ok[ok.length - 1].to, need: need - made, heat: take, segments: segs.map((x) => ({s: x.s, e: x.e, t: x.t}))});
+            log(`La IA escogió ${moments.length} momentos de los picos del chat.`);
+            await makeClips(item, src, segs, moments, credit, dir, need);
+            return true;
+          }
+
+          // ---------- Streamers sugeridos: los que tienen más gente en la categoría (Kick) ----------
+          const KICK_TOP_PY = `
+          import sys, json
+          from curl_cffi import requests
+          cat, lang = sys.argv[1], sys.argv[2].lower()
+          out = []
+          for page in (1, 2, 3, 4):
+              try:
+                  r = requests.get("https://kick.com/stream/livestreams/es", params={"page": page, "limit": 24, "subcategory": cat, "sort": "desc"}, impersonate="chrome", timeout=30)
+                  for d in (r.json().get("data") or []):
+                      if lang and (d.get("language") or "").lower() != lang:
+                          continue
+                      ch = d.get("channel") or {}
+                      out.append({"slug": ch.get("slug"), "name": ((ch.get("user") or {}).get("username")) or ch.get("slug"), "viewers": d.get("viewer_count") or 0,
+                                  "title": d.get("session_title") or "", "lang": d.get("language") or ""})
+              except Exception as e:
+                  print(json.dumps({"error": str(e)[:200]}), file=sys.stderr)
+          print(json.dumps(out))
+          `;
+          async function discover(d) {
+            try {
+              const py = join(WORK, 'py', 'kicktop.py');
+              mkdirSync(join(WORK, 'py'), {recursive: true});
+              writeFileSync(py, KICK_TOP_PY);
+              const r = spawnSync('python3', [py, d.category, d.lang || ''], {encoding: 'utf8', timeout: 180000});
+              const list = JSON.parse((r.stdout || '').trim().split('\n').pop() || '[]');
+              await api('robot/clips-suggest', {list});
+              log(`Sugeridos: ${list.length} streamers en ${d.category} (${d.lang}).`);
+            } catch (e) {
+              log('Sugeridos: ' + e.message);
+            }
           }
 
           async function listSource(src) {
@@ -447,66 +638,9 @@ jobs:
           const PLATFORM = {youtube: 'YouTube', kick: 'Kick', twitch: 'Twitch', archivo: '', otro: ''};
           let made = 0, windows = 0;
 
-          async function workItem(item, need, cfg) {
-            log(`Video: ${item.title || item.url || 'archivo subido'} (${item.handle || item.creator || 'sin crédito'})`);
-            let src;
-            try {
-              src = await prepareSource(item);
-            } catch (e) {
-              const blocked = BLOCKED.test(e.message);
-              const msg = blocked
-                ? (item.platform === 'youtube'
-                    ? 'YouTube bloqueó la descarga desde GitHub ("confirma que no eres un bot"). Usa el mismo stream en Kick o Twitch, o sube el archivo en la pestaña Clips.'
-                    : 'La plataforma bloqueó la descarga desde GitHub. Prueba el link de otra plataforma o sube el archivo.') + ' (' + e.message.slice(0, 160) + ')'
-                : e.message;
-              log('No se pudo abrir: ' + msg);
-              await api('robot/clips-item', {id: item.id, error: msg, blocked});
-              return {stop: false};
-            }
-            await api('robot/clips-item', {id: item.id, title: src.title, duration: src.duration, creator: src.creator, handle: src.handle});
-            const handle = item.handle || src.handle || (item.creator ? '@' + item.creator.replace(/\s+/g, '') : '');
-            const platform = PLATFORM[item.platform] || '';
-            const credit = `Clip de ${handle || item.creator || 'su creador'}${platform ? ' · ' + platform : ''}`;
-            // Streams largos: se salta el inicio (intro, saludos y espera) la primera vez.
-            let cursor = item.cursor || (src.duration > 3600 ? 600 : 0);
-            while (made < need && windows < 4 && elapsedMin() < BUDGET_MIN) {
-              const total = src.duration || 0;
-              if (total && cursor >= total - 20) {
-                await api('robot/clips-item', {id: item.id, finished: true});
-                log('Este video ya se revisó completo.');
-                return {stop: false};
-              }
-              const from = cursor, to = total ? Math.min(total, from + cfg.windowMin * 60) : from + cfg.windowMin * 60;
-              windows++;
-              const dir = join(WORK, 'w' + windows);
-              mkdirSync(dir, {recursive: true});
-              log(`Bajando solo el audio de ${Math.round(from / 60)} a ${Math.round(to / 60)} min…`);
-              const wav = join(dir, 'audio.wav');
-              try {
-                grabAudio(src, from, to, wav);
-              } catch (e) {
-                const blocked = BLOCKED.test(e.message);
-                await api('robot/clips-item', {id: item.id, error: 'No se pudo bajar el audio: ' + e.message.slice(0, 300), blocked});
-                return {stop: false};
-              }
-              const got = probe(wav);
-              if (got < 20) {
-                await api('robot/clips-item', {id: item.id, finished: true});
-                return {stop: false};
-              }
-              log(`Transcribiendo ${Math.round(got / 60)} min con faster-whisper (${WHISPER})…`);
-              const py = join(WORK, 'py', 'whisper.py');
-              mkdirSync(join(WORK, 'py'), {recursive: true});
-              writeFileSync(py, WHISPER_PY);
-              const tj = join(dir, 'tr.json');
-              const tw = Date.now();
-              execFileSync('python3', [py, wav, tj, WHISPER], {stdio: ['ignore', 'inherit', 'inherit'], timeout: 80 * 60000});
-              log(`Transcripción en ${Math.round((Date.now() - tw) / 1000)} s.`);
-              const segs = JSON.parse(readFileSync(tj, 'utf8')).map((x) => ({...x, s: x.s + from, e: x.e + from, w: x.w.map((w) => ({...w, s: w.s + from, e: w.e + from}))}));
-              cursor = from + got;
-              const {moments = []} = await api('robot/clips-pick', {id: item.id, from, to: cursor, need: need - made, segments: segs.map((x) => ({s: x.s, e: x.e, t: x.t}))});
-              log(`La IA escogió ${moments.length} momentos.`);
-              for (const m of moments) {
+          /** Arma, sube y deja en Aprobación los clips de estos momentos. */
+          async function makeClips(item, src, segs, moments, credit, dir, need) {
+            for (const m of moments) {
                 if (made >= need || elapsedMin() > BUDGET_MIN + 15) break;
                 const words = segs.flatMap((x) => x.w).filter((w) => w.s >= m.start - 0.05 && w.e <= m.end + 0.3).map((w) => ({...w, s: w.s - m.start, e: w.e - m.start}));
                 const transcript = segs.filter((x) => x.e > m.start && x.s < m.end).map((x) => x.t).join(' ');
@@ -548,7 +682,74 @@ jobs:
                   log('No se pudo subir: ' + e.message);
                   await api('robot/clip-fail', {id: p.id, itemId: item.id, start: m.start, end: m.end, error: e.message}).catch(() => {});
                 }
+            }
+          }
+
+          async function workItem(item, need, cfg) {
+            log(`Video: ${item.title || item.url || 'archivo subido'} (${item.handle || item.creator || 'sin crédito'})`);
+            let src;
+            try {
+              src = await prepareSource(item);
+            } catch (e) {
+              const blocked = BLOCKED.test(e.message);
+              const msg = blocked
+                ? (item.platform === 'youtube'
+                    ? 'YouTube bloqueó la descarga desde GitHub ("confirma que no eres un bot"). Usa el mismo stream en Kick o Twitch, o sube el archivo en la pestaña Clips.'
+                    : 'La plataforma bloqueó la descarga desde GitHub. Prueba el link de otra plataforma o sube el archivo.') + ' (' + e.message.slice(0, 160) + ')'
+                : e.message;
+              log('No se pudo abrir: ' + msg);
+              await api('robot/clips-item', {id: item.id, error: msg, blocked});
+              return {stop: false};
+            }
+            await api('robot/clips-item', {id: item.id, title: src.title, duration: src.duration, creator: src.creator, handle: src.handle});
+            const handle = item.handle || src.handle || (item.creator ? '@' + item.creator.replace(/\s+/g, '') : '');
+            const platform = PLATFORM[item.platform] || '';
+            const credit = `Clip de ${handle || item.creator || 'su creador'}${platform ? ' · ' + platform : ''}`;
+            // Como en las máquinas de clips: primero se mira DÓNDE EXPLOTÓ EL CHAT en todo el stream y solo se
+            // transcriben esos pedazos (mucho más rápido y salen los mejores momentos).
+            if (await workPeaks(item, src, need, credit)) return {stop: false};
+            // Sin chat (YouTube o archivo): se revisa por partes. Streams largos: se salta el inicio la primera vez.
+            let cursor = item.cursor || (src.duration > 3600 ? 600 : 0);
+            while (made < need && windows < 4 && elapsedMin() < BUDGET_MIN) {
+              const total = src.duration || 0;
+              if (total && cursor >= total - 20) {
+                await api('robot/clips-item', {id: item.id, finished: true});
+                log('Este video ya se revisó completo.');
+                return {stop: false};
               }
+              const from = cursor, to = total ? Math.min(total, from + cfg.windowMin * 60) : from + cfg.windowMin * 60;
+              windows++;
+              const dir = join(WORK, 'w' + windows);
+              mkdirSync(dir, {recursive: true});
+              log(`Bajando solo el audio de ${Math.round(from / 60)} a ${Math.round(to / 60)} min…`);
+              const wav = join(dir, 'audio.wav');
+              try {
+                grabAudio(src, from, to, wav);
+              } catch (e) {
+                const blocked = BLOCKED.test(e.message);
+                await api('robot/clips-item', {id: item.id, error: 'No se pudo bajar el audio: ' + e.message.slice(0, 300), blocked});
+                return {stop: false};
+              }
+              const got = probe(wav);
+              if (got < 20) {
+                await api('robot/clips-item', {id: item.id, finished: true});
+                return {stop: false};
+              }
+              log(`Transcribiendo ${Math.round(got / 60)} min con faster-whisper (${WHISPER})…`);
+              const py = join(WORK, 'py', 'whisper.py');
+              mkdirSync(join(WORK, 'py'), {recursive: true});
+              writeFileSync(py, WHISPER_PY);
+              const tj = join(dir, 'tr.json');
+              const tw = Date.now();
+              execFileSync('python3', [py, wav, tj, WHISPER], {stdio: ['ignore', 'inherit', 'inherit'], timeout: 80 * 60000});
+              log(`Transcripción en ${Math.round((Date.now() - tw) / 1000)} s.`);
+              const segs = JSON.parse(readFileSync(tj, 'utf8')).map((x) => ({...x, s: x.s + from, e: x.e + from, w: x.w.map((w) => ({...w, s: w.s + from, e: w.e + from}))}));
+              cursor = from + got;
+              const heat = kickHeat(src, from, cursor);
+              if (heat.length) log(`El chat explotó en ${heat.length} momentos (el más fuerte: ${heat[0][1]}x).`);
+              const {moments = []} = await api('robot/clips-pick', {id: item.id, from, to: cursor, need: need - made, heat, segments: segs.map((x) => ({s: x.s, e: x.e, t: x.t}))});
+              log(`La IA escogió ${moments.length} momentos.`);
+              await makeClips(item, src, segs, moments, credit, dir, need);
               rmSync(wav, {force: true});
             }
             return {stop: false};
@@ -557,6 +758,7 @@ jobs:
           async function main() {
             mkdirSync(WORK, {recursive: true});
             let next = await api('robot/clips-next', {});
+            if (next.discover) await discover(next.discover);
             if (next.action === 'check' || (next.sources || []).length) {
               for (const s of next.sources || []) {
                 try {
