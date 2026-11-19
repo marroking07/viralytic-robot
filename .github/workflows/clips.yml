@@ -262,17 +262,23 @@ jobs:
           def rate(s):
               for _ in range(2):
                   try:
-                      r = requests.get(f"https://kick.com/api/v2/channels/{cid}/messages", params={"start_time": iso(s)}, impersonate="chrome", timeout=20)
+                      r = requests.get(f"https://kick.com/api/v2/channels/{cid}/messages", params={"start_time": iso(s)}, impersonate="chrome", timeout=20, headers={"Accept": "application/json"})
+                      if r.status_code != 200:
+                          ERR.append(f"{r.status_code} {r.text[:120]!r}")
+                          continue
                       ms = (r.json().get("data") or {}).get("messages") or []
                       ts = sorted(datetime.datetime.fromisoformat(m["created_at"].replace("Z", "+00:00")).timestamp() for m in ms if m.get("created_at"))
                       if len(ts) < 2:
                           return [s, 0.0]
                       return [s, round(len(ts) / max(1.0, ts[-1] - ts[0]), 3)]
-                  except Exception:
-                      pass
+                  except Exception as e:
+                      ERR.append(repr(e)[:150])
               return [s, 0.0]
+          ERR = []
           with ThreadPoolExecutor(8) as ex:
               out = list(ex.map(rate, range(a, b, 10)))
+          if ERR:
+              sys.stderr.write(f"{len(ERR)} errores; ej: {ERR[0]}\n")
           print(json.dumps(out))
           `;
           /** Picos del chat en [from, to]: [[segundo, veces más que lo normal]], los más fuertes primero. */
@@ -335,6 +341,7 @@ jobs:
               try {
                 rows = JSON.parse((r.stdout || '').trim().split('\n').pop() || '[]');
               } catch {}
+              if (!rows.some((x) => x[1] > 0)) log('Chat de Kick: ' + String(r.stderr || r.error?.message || 'sin mensajes').slice(-300));
             } else if (item.platform === 'twitch') rows = twitchHeatRows(item);
             rows = rows.filter((x) => x[1] > 0);
             if (rows.length < 20) return [];
