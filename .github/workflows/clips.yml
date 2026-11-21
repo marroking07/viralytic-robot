@@ -2,7 +2,7 @@ name: Clips Viralytic
 
 on:
   schedule:
-    - cron: '41 17 * * *'   # 1 vez al día (11:41 am en México): revisa canales fijos y arma los clips del día
+    - cron: '41 2,5,8,11,14,17,20,23 * * *'   # cada 3 horas se asoma (1 min); solo trabaja si faltan clips del día o pediste más con el botón
   workflow_dispatch: {}       # botón "Run workflow" para probar a mano
 
 permissions:
@@ -14,7 +14,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  revisar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      work: ${{ steps.peek.outputs.work }}
+    steps:
+      - id: peek
+        env:
+          APP_URL: https://viralytic-ai.pll-studio.workers.dev
+        run: |
+          cat > peek.mjs <<'PEEK_EOF'
+          const t = await fetch(process.env.ACTIONS_ID_TOKEN_REQUEST_URL + '&audience=viralytic-ai', {headers: {Authorization: 'bearer ' + process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}}).then((r) => r.json());
+          const r = await fetch(process.env.APP_URL + '/api/robot/clips-next', {method: 'POST', headers: {Authorization: 'Bearer ' + t.value, 'Content-Type': 'application/json'}, body: '{}'});
+          const j = await r.json().catch(() => ({}));
+          const work = r.ok && (j.action === 'work' || j.action === 'check' || !!j.discover);
+          console.log('Robot de clips:', j.action, j.need ?? '', j.reason || '');
+          await import('node:fs').then((fs) => fs.appendFileSync(process.env.GITHUB_OUTPUT, 'work=' + (work || !r.ok) + String.fromCharCode(10)));
+          PEEK_EOF
+          node peek.mjs
   clips:
+    needs: revisar
+    if: github.event_name != 'schedule' || needs.revisar.outputs.work == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
