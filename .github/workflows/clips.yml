@@ -299,7 +299,7 @@ jobs:
           with ThreadPoolExecutor(8) as ex:
               out = list(ex.map(rate, range(a, b, 10)))
           if ERR:
-              sys.stderr.write(f"{len(ERR)} errores; ej: {ERR[0]}\n")
+              sys.stderr.write(f"{len(ERR)} errores; ej: {ERR[0]}" + chr(10))
           print(json.dumps(out))
           `;
           /** Picos del chat en [from, to]: [[segundo, veces más que lo normal]], los más fuertes primero. */
