@@ -49,7 +49,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg fonts-dejavu-core > /dev/null
           sudo apt-get install -y -qq fonts-montserrat > /dev/null || true
-          pip install -q edge-tts pillow numpy
+          pip install -q edge-tts pillow numpy opencv-python-headless
       - name: Hacer videos
         env:
           APP_URL: https://viralytic-ai.pll-studio.workers.dev
@@ -175,86 +175,141 @@ jobs:
               if cur: lines.append(cur)
               return lines
           def card(text, i, n, out):
-              img = background(); d = ImageDraw.Draw(img)
-              # Marca arriba
-              fb = font(46)
+              # Capa transparente encima del fondo: marca, barra de avance, texto grande y sombras para que se lea.
+              img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+              sh = np.zeros((H, 1), float)
+              yy = np.arange(H)
+              sh[:, 0] = np.clip(1 - yy / 520.0, 0, 1) * 0.86 + np.clip((yy - 1240) / 520.0, 0, 1) * 0.8
+              shade = Image.fromarray((np.repeat(sh, W, 1) * 255).astype('uint8'))
+              dark = Image.new('RGBA', (W, H), (4, 8, 12, 255)); dark.putalpha(shade)
+              img = Image.alpha_composite(img, dark)
+              d = ImageDraw.Draw(img)
+              fb = font(44)
               w1 = d.textlength('IA ', font=fb); w2 = d.textlength('QUE PAGA', font=fb)
               x0 = (W - w1 - w2) / 2
-              d.text((x0, 120), 'IA ', font=fb, fill='white'); d.text((x0 + w1, 120), 'QUE PAGA', font=fb, fill=GREEN)
-              # Barra de avance
-              bw = 600; bx = (W - bw) // 2
-              d.rounded_rectangle((bx, 196, bx + bw, 206), 5, fill=(255, 255, 255, 40))
-              d.rounded_rectangle((bx, 196, bx + int(bw * (i + 1) / n), 206), 5, fill=GREEN)
-              # Texto grande de la escena
+              d.text((x0, 58), 'IA ', font=fb, fill='white'); d.text((x0 + w1, 58), 'QUE PAGA', font=fb, fill=GREEN)
+              bw = 520; bx = (W - bw) // 2
+              d.rounded_rectangle((bx, 126, bx + bw, 134), 4, fill=(255, 255, 255, 60))
+              d.rounded_rectangle((bx, 126, bx + int(bw * (i + 1) / n), 134), 4, fill=GREEN)
               text = (text or '').strip().upper()
-              size = 112
-              while size > 60:
-                  f = font(size); lines = wrap(d, text, f, W - 140)
-                  if len(lines) <= 3: break
-                  size -= 8
-              f = font(size); lines = wrap(d, text, f, W - 140)[:4]
-              lh = int(size * 1.12); top = 400 - (len(lines) * lh) // 2
+              size = 96
+              while size > 56:
+                  f = font(size); lines = wrap(d, text, f, W - 120)
+                  if len(lines) <= 2: break
+                  size -= 6
+              f = font(size); lines = wrap(d, text, f, W - 120)[:3]
+              lh = int(size * 1.1); top = 262 - (len(lines) * lh) // 2
               for k, ln in enumerate(lines):
                   tw = d.textlength(ln, font=f)
                   col = GREEN if k == len(lines) - 1 and len(lines) > 1 else (255, 255, 255)
-                  d.text(((W - tw) / 2 + 4, top + k * lh + 6), ln, font=f, fill=(0, 0, 0, 120))
-                  d.text(((W - tw) / 2, top + k * lh), ln, font=f, fill=col)
-              img.convert('RGB').save(out, quality=94)
+                  d.text(((W - tw) / 2, top + k * lh), ln, font=f, fill=col, stroke_width=6, stroke_fill=(0, 0, 0, 230))
+              # Invitación a seguir (abajo a la derecha, junto al personaje)
+              if i == n - 1 or i == 0:
+                  fs = font(40); lab = 'SÍGUEME' if i == n - 1 else 'MIRA HASTA EL FINAL'
+                  tw = d.textlength(lab, font=fs); x1 = W - 60 - tw - 56; y1 = 1720
+                  d.rounded_rectangle((x1, y1, W - 60, y1 + 84), 42, fill=GREEN)
+                  d.text((x1 + 28, y1 + 18), lab, font=fs, fill=(6, 10, 16))
+              img.save(out)
+
+          def scene_bg(src, out_blur, out_sq):
+              # Fondo: la misma imagen borrosa y oscura llenando la pantalla, y la imagen nítida en cuadro (se le hace zoom en ffmpeg).
+              if src:
+                  im = Image.open(src).convert('RGB')
+              else:
+                  im = background().convert('RGB').crop((0, 400, W, 400 + W))
+              s = max(W / im.width, H / im.height)
+              big = im.resize((int(im.width * s) + 1, int(im.height * s) + 1), Image.LANCZOS)
+              l = (big.width - W) // 2; t = (big.height - H) // 2
+              big = big.crop((l, t, l + W, t + H)).filter(ImageFilter.GaussianBlur(28))
+              big = Image.blend(big, Image.new('RGB', (W, H), (4, 10, 12)), 0.45)
+              big.save(out_blur, quality=92)
+              side = min(im.width, im.height)
+              sq = im.crop(((im.width - side) // 2, (im.height - side) // 2, (im.width - side) // 2 + side, (im.height - side) // 2 + side)).resize((W, W), Image.LANCZOS)
+              sq.save(out_sq, quality=94)
 
           def load(path):
               return Image.open(path).convert('RGB')
           def align(closed, opened):
-              # Pone la imagen con boca abierta del mismo tamaño y encima exacto de la cerrada (correlación de fase).
+              # Pone la imagen con boca abierta exactamente encima de la cerrada (OpenCV ECC afín: mueve, gira y escala).
+              import cv2
               opened = opened.resize(closed.size, Image.LANCZOS)
-              a = np.asarray(closed.convert('L').resize((closed.width // 4, closed.height // 4)), float)
-              b = np.asarray(opened.convert('L').resize((closed.width // 4, closed.height // 4)), float)
-              A = np.fft.fft2(a - a.mean()); B = np.fft.fft2(b - b.mean())
-              R = A * np.conj(B); R /= np.abs(R) + 1e-9
-              r = np.fft.ifft2(R).real
-              dy, dx = np.unravel_index(np.argmax(r), r.shape)
-              if dy > a.shape[0] // 2: dy -= a.shape[0]
-              if dx > a.shape[1] // 2: dx -= a.shape[1]
-              return opened.transform(opened.size, Image.AFFINE, (1, 0, -dx * 4, 0, 1, -dy * 4), resample=Image.BICUBIC)
+              k = 0.5
+              a = cv2.resize(np.asarray(closed.convert('L'), np.float32), None, fx=k, fy=k)
+              b = cv2.resize(np.asarray(opened.convert('L'), np.float32), None, fx=k, fy=k)
+              h, w = a.shape
+              m = np.zeros((h, w), np.uint8); m[int(h * 0.05):int(h * 0.6), int(w * 0.15):int(w * 0.85)] = 255
+              M = np.eye(2, 3, dtype=np.float32)
+              try:
+                  _, M = cv2.findTransformECC(a, b, M, cv2.MOTION_AFFINE, (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 300, 1e-6), m, 5)
+              except cv2.error:
+                  pass
+              M[:, 2] /= k
+              out = cv2.warpAffine(np.asarray(opened), M, closed.size, flags=cv2.INTER_CUBIC + cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_REPLICATE)
+              return Image.fromarray(out)
           def mouth_box(closed, opened):
               a = np.asarray(closed, float); b = np.asarray(opened, float)
               diff = np.abs(a - b).sum(2)
               h, w = diff.shape
               # Solo se busca en la parte media de la cara (donde va la boca).
-              zone = np.zeros_like(diff); zone[int(h * 0.25):int(h * 0.55), int(w * 0.3):int(w * 0.7)] = 1
+              zone = np.zeros_like(diff); zone[int(h * 0.3):int(h * 0.55), int(w * 0.33):int(w * 0.67)] = 1
               diff = diff * zone
               thr = np.percentile(diff[zone > 0], 96)
               ys, xs = np.where(diff > thr)
               cy, cx = np.median(ys), np.median(xs)
-              ry = min(h * 0.055, max(h * 0.03, np.percentile(np.abs(ys - cy), 90) * 1.4))
-              rx = min(w * 0.13, max(w * 0.07, np.percentile(np.abs(xs - cx), 90) * 1.4))
+              ry = min(h * 0.04, max(h * 0.022, np.percentile(np.abs(ys - cy), 85) * 1.25))
+              rx = min(w * 0.11, max(w * 0.06, np.percentile(np.abs(xs - cx), 85) * 1.25))
               return cx, cy, rx, ry
           def avatar(cfg):
               closed = load(cfg['closed']); opened = align(closed, load(cfg['open']))
               cx, cy, rx, ry = mouth_box(closed, opened)
               m = Image.new('L', closed.size, 0)
               ImageDraw.Draw(m).ellipse((cx - rx, cy - ry, cx + rx, cy + ry), fill=255)
-              m = m.filter(ImageFilter.GaussianBlur(max(6, int(min(rx, ry) * 0.35))))
+              m = m.filter(ImageFilter.GaussianBlur(max(5, int(min(rx, ry) * 0.3))))
               talk = closed.copy(); talk.paste(opened, (0, 0), m)
-              # Cabeza y hombros abajo del video: la boca queda al 67% del recuadro y se difuminan las orillas.
-              box_h = 1100
-              s = W / closed.width
-              nw, nh = int(closed.width * s), int(closed.height * s)
-              top = int(max(0, min(nh - box_h, cy * s - box_h * 0.67)))
-              left = (W - nw) // 2
-              yy = np.clip(np.arange(box_h) / 220.0, 0, 1)[:, None] ** 1.5
-              xx = np.ones((1, nw))
-              alpha = Image.fromarray((yy * xx * 255).astype('uint8'))
+              # Recorte del personaje sin el fondo verde (llave de color + relleno desde las orillas).
+              import cv2
+              hsv = cv2.cvtColor(np.asarray(closed), cv2.COLOR_RGB2HSV).astype(int)
+              hh, ss, vv = hsv[..., 0] * 2, hsv[..., 1] / 255.0, hsv[..., 2] / 255.0
+              green = ((hh >= 75) & (hh <= 185) & (ss > 0.15)) | (vv < 0.07)
+              lab = cv2.connectedComponents(green.astype(np.uint8), connectivity=4)[1]
+              border = set(np.unique(np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]]))) - {0}
+              bgm = np.isin(lab, list(border)) & green
+              fg = (~bgm).astype(np.uint8)
+              fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+              n_, lab2, st, _ = cv2.connectedComponentsWithStats(fg, 8)
+              if n_ > 1: fg = (lab2 == 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))).astype(np.uint8)
+              alpha = cv2.GaussianBlur(cv2.erode(fg * 255, np.ones((3, 3), np.uint8)), (0, 0), 1.6)
+              ys = np.where(fg.any(1))[0]; top = int(ys.min()) if len(ys) else 0
+              bottom = int(min(closed.height, cy + (cy - top) * 1.15))
+              xs = np.where(fg[top:bottom].any(0))[0]; left, right = (int(xs.min()), int(xs.max())) if len(xs) else (0, closed.width)
+              box = (left, max(0, top - 10), right, bottom)
+              AH = 640
               outs = []
               for k, im in enumerate([closed, talk]):
-                  part = im.resize((nw, nh), Image.LANCZOS).crop((0, top, nw, top + box_h)).convert('RGBA')
-                  part.putalpha(alpha)
-                  canvas = Image.new('RGBA', (W, box_h), (0, 0, 0, 0))
-                  canvas.paste(part, (left, 0), part)
+                  rgba = im.convert('RGBA'); rgba.putalpha(Image.fromarray(alpha))
+                  part = rgba.crop(box)
+                  sc = AH / part.height
+                  part = part.resize((int(part.width * sc), AH), Image.LANCZOS)
+                  # fundido abajo para que no se vea el corte de los hombros
+                  a = np.asarray(part.getchannel('A')).astype(float)
+                  a *= np.clip((AH - np.arange(AH)) / 90.0, 0, 1)[:, None]
+                  part.putalpha(Image.fromarray(a.astype('uint8')))
+                  pad = 40
+                  canvas = Image.new('RGBA', (part.width + pad * 2, AH + pad), (0, 0, 0, 0))
+                  glow = Image.new('RGBA', canvas.size, GREEN + (0,))
+                  ga = Image.new('L', canvas.size, 0); ga.paste(part.getchannel('A'), (pad, pad))
+                  ga = ga.filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.GaussianBlur(16)).point(lambda v: int(v * 0.55))
+                  glow.putalpha(ga)
+                  canvas = Image.alpha_composite(canvas, glow)
+                  canvas.alpha_composite(part, (pad, pad))
                   p = cfg['outdir'] + f'/av{k}.png'; canvas.save(p); outs.append(p)
+              top = 0
               print(json.dumps({'mouth': [float(cx), float(cy), float(rx), float(ry)], 'top': top}))
 
           if cfg['mode'] == 'cards':
-              for c in cfg['cards']: card(c['text'], c['i'], c['n'], c['out'])
+              for c in cfg['cards']:
+                  card(c['text'], c['i'], c['n'], c['out'])
+                  scene_bg(c.get('img'), c['blur'], c['sq'])
           elif cfg['mode'] == 'avatar':
               avatar(cfg)
           elif cfg['mode'] == 'mouth':
@@ -315,7 +370,7 @@ jobs:
 
           [V4+ Styles]
           Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-          Style: Sub,Montserrat ExtraBold,68,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,1,0,0,0,100,100,0,0,1,5,2,8,70,70,640,1
+          Style: Sub,Montserrat ExtraBold,74,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,1,0,0,0,100,100,0,0,1,6,3,8,60,60,1250,1
 
           [Events]
           Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -333,6 +388,18 @@ jobs:
           }
 
           // ---------- Un video ----------
+          async function image(p, i, file) {
+            try {
+              const r = await request('robot/iapaga-image', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id: p.id, index: i})}, 2);
+              if (!r.ok) { log('Sin imagen para la escena ' + (i + 1) + ': ' + (await r.text()).slice(0, 160)); return null; }
+              writeFileSync(file, Buffer.from(await r.arrayBuffer()));
+              return statSync(file).size > 2000 ? file : null;
+            } catch (e) {
+              log('Sin imagen para la escena ' + (i + 1) + ': ' + e.message);
+              return null;
+            }
+          }
+
           async function produce(p, v) {
             const dir = join(WORK, p.id);
             mkdirSync(dir, {recursive: true});
@@ -351,36 +418,56 @@ jobs:
               parts.push(wav);
               t += d;
             }
-            // Audio completo
             const list = join(dir, 'a.txt');
             writeFileSync(list, parts.map((f) => `file '${f}'`).join('\n'));
             const wav = join(dir, 'voz.wav');
             execFileSync('ffmpeg', ['-y', '-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', wav]);
-            // Fondos de cada escena
-            py({mode: 'cards', cards: p.scenes.map((s, i) => ({text: s.card || '', i, n, out: join(dir, `c${i}.jpg`)}))});
+            // Imágenes de fondo (máximo 5 por video; las demás escenas reusan una con otro encuadre)
+            const imgs = [];
+            for (let i = 0; i < Math.min(n, 5); i++) imgs.push(await image(p, i, join(dir, `img${i}.jpg`)));
+            const pick = (i) => imgs[i % imgs.length] || imgs.find(Boolean) || null;
+            py({mode: 'cards', cards: p.scenes.map((s, i) => ({text: s.card || '', i, n, out: join(dir, `c${i}.png`), img: pick(i), blur: join(dir, `b${i}.jpg`), sq: join(dir, `q${i}.jpg`)}))});
+            // Un archivo por escena: fondo borroso + imagen con zoom lento + textos
+            const clips = [];
+            for (let i = 0; i < n; i++) {
+              const d = durations[i], fr = Math.ceil(d * 30), tmp = join(dir, `s${i}.tmp.mp4`), fin = join(dir, `s${i}.mp4`);
+              const zin = i % 2 === 0;
+              const z = zin ? `min(1+0.0009*on,1.18)` : `max(1.18-0.0009*on,1)`;
+              execFileSync('ffmpeg', [
+                '-y', '-v', 'error',
+                '-loop', '1', '-framerate', '30', '-t', d.toFixed(3), '-i', join(dir, `b${i}.jpg`),
+                '-loop', '1', '-framerate', '30', '-t', d.toFixed(3), '-i', join(dir, `q${i}.jpg`),
+                '-loop', '1', '-framerate', '30', '-t', d.toFixed(3), '-i', join(dir, `c${i}.png`),
+                '-filter_complex', `[1:v]scale=2160:2160,zoompan=z='${z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1080x1080:fps=30,fade=t=in:st=0:d=0.25[sq];[0:v][sq]overlay=0:380[b];[b][2:v]overlay=0:0,format=yuv420p[v]`,
+                '-map', '[v]', '-frames:v', String(fr), '-r', '30', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', tmp,
+              ], {stdio: ['ignore', 'inherit', 'inherit'], timeout: 600000});
+              execFileSync('mv', [tmp, fin]);
+              clips.push(fin);
+            }
             const cl = join(dir, 'c.txt');
-            writeFileSync(cl, ['ffconcat version 1.0', ...p.scenes.flatMap((_, i) => [`file '${join(dir, `c${i}.jpg`)}'`, `duration ${durations[i]}`]), `file '${join(dir, `c${n - 1}.jpg`)}'`].join('\n'));
-            // Boca
+            writeFileSync(cl, clips.map((f) => `file '${f}'`).join('\n'));
+            const bgv = join(dir, 'fondo.mp4');
+            execFileSync('ffmpeg', ['-y', '-v', 'error', '-f', 'concat', '-safe', '0', '-i', cl, '-c', 'copy', bgv]);
+            // Boca + subtítulos + voz encima
             const ml = join(dir, 'm.txt');
             py({mode: 'mouth', wav, outdir: av, out: ml});
-            // Subtítulos
             const ass = join(dir, 's.ass');
             subtitles(allWords, ass);
             const out = join(dir, 'video.mp4');
             const total = durations.reduce((a, b) => a + b, 0);
             execFileSync('ffmpeg', [
               '-y', '-v', 'error',
-              '-f', 'concat', '-safe', '0', '-i', cl,
+              '-i', bgv,
               '-f', 'concat', '-safe', '0', '-i', ml,
               '-i', wav,
-              '-filter_complex', `[0:v]fps=30,scale=1080:1920,setsar=1[bg];[1:v]fps=30,format=rgba[av];[bg][av]overlay=0:820:shortest=0[v1];[v1]ass=${ass}:fontsdir=/usr/share/fonts,format=yuv420p[v]`,
+              '-filter_complex', `[1:v]fps=30,format=rgba[av];[0:v][av]overlay=0:H-h:shortest=0[v1];[v1]ass=${ass}:fontsdir=/usr/share/fonts,format=yuv420p[v]`,
               '-map', '[v]', '-map', '2:a',
               '-t', total.toFixed(2),
               '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-r', '30',
               '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart',
               out,
             ], {stdio: ['ignore', 'inherit', 'inherit'], timeout: 900000});
-            log('Video armado: ' + (statSync(out).size / 1e6).toFixed(1) + ' MB, ' + total.toFixed(1) + ' s');
+            log('Video armado: ' + (statSync(out).size / 1e6).toFixed(1) + ' MB, ' + total.toFixed(1) + ' s, imágenes: ' + imgs.filter(Boolean).length);
             const r = await request('video', {
               method: 'POST',
               headers: {'Content-Type': 'video/mp4', 'X-Project-Id': p.id, 'X-Render-Token': p.renderToken, 'X-Scene-Durations': JSON.stringify(durations)},
