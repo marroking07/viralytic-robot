@@ -205,10 +205,10 @@ jobs:
                   d.text(((W - tw) / 2, top + k * lh), ln, font=f, fill=col, stroke_width=6, stroke_fill=(0, 0, 0, 230))
               # Invitación a seguir (abajo a la derecha, junto al personaje)
               if i == n - 1 or i == 0:
-                  fs = font(40); lab = 'SÍGUEME' if i == n - 1 else 'MIRA HASTA EL FINAL'
-                  tw = d.textlength(lab, font=fs); x1 = W - 60 - tw - 56; y1 = 1720
-                  d.rounded_rectangle((x1, y1, W - 60, y1 + 84), 42, fill=GREEN)
-                  d.text((x1 + 28, y1 + 18), lab, font=fs, fill=(6, 10, 16))
+                  fs = font(34); lab = 'SÍGUEME' if i == n - 1 else 'MIRA HASTA EL FINAL'
+                  tw = d.textlength(lab, font=fs); x1 = W - 36 - tw - 48; y1 = 1560
+                  d.rounded_rectangle((x1, y1, W - 36, y1 + 72), 36, fill=GREEN)
+                  d.text((x1 + 24, y1 + 16), lab, font=fs, fill=(6, 10, 16))
               img.save(out)
 
           def scene_bg(src, out_blur, out_sq):
@@ -431,14 +431,16 @@ jobs:
             const clips = [];
             for (let i = 0; i < n; i++) {
               const d = durations[i], fr = Math.ceil(d * 30), tmp = join(dir, `s${i}.tmp.mp4`), fin = join(dir, `s${i}.mp4`);
-              const zin = i % 2 === 0;
-              const z = zin ? `min(1+0.0009*on,1.18)` : `max(1.18-0.0009*on,1)`;
+              // Movimiento lento (paneo) de la imagen: se agranda un poco y se recorre de un lado a otro.
+              const pan = [['0', '(ih-oh)/2'], ['iw-ow', '(ih-oh)/2'], ['(iw-ow)/2', '0'], ['(iw-ow)/2', 'ih-oh']][i % 4];
+              const px = `(${pan[0]})*(t/${d.toFixed(3)})+((iw-ow)/2)*(1-t/${d.toFixed(3)})`;
+              const py_ = `(${pan[1]})*(t/${d.toFixed(3)})+((ih-oh)/2)*(1-t/${d.toFixed(3)})`;
               execFileSync('ffmpeg', [
                 '-y', '-v', 'error',
                 '-loop', '1', '-framerate', '30', '-t', d.toFixed(3), '-i', join(dir, `b${i}.jpg`),
                 '-loop', '1', '-framerate', '30', '-t', d.toFixed(3), '-i', join(dir, `q${i}.jpg`),
                 '-loop', '1', '-framerate', '30', '-t', d.toFixed(3), '-i', join(dir, `c${i}.png`),
-                '-filter_complex', `[1:v]scale=2160:2160,zoompan=z='${z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1080x1080:fps=30,fade=t=in:st=0:d=0.25[sq];[0:v][sq]overlay=0:380[b];[b][2:v]overlay=0:0,format=yuv420p[v]`,
+                '-filter_complex', `[1:v]scale=1240:1240,crop=1080:1080:x='${px}':y='${py_}',setsar=1,format=yuv420p,fade=t=in:st=0:d=0.25[sq];[0:v][sq]overlay=0:380[b];[b][2:v]overlay=0:0,format=yuv420p[v]`,
                 '-map', '[v]', '-frames:v', String(fr), '-r', '30', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', tmp,
               ], {stdio: ['ignore', 'inherit', 'inherit'], timeout: 600000});
               execFileSync('mv', [tmp, fin]);
