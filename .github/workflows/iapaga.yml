@@ -1,0 +1,421 @@
+name: IA que Paga
+
+on:
+  schedule:
+    - cron: '17 1,4,7,10,13,16,19,22 * * *'   # cada 3 horas se asoma (1 min); solo trabaja si faltan videos del día o pediste más
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: iapaga
+  cancel-in-progress: false
+
+jobs:
+  revisar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      work: ${{ steps.peek.outputs.work }}
+    steps:
+      - id: peek
+        env:
+          APP_URL: https://viralytic-ai.pll-studio.workers.dev
+        run: |
+          cat > peek.mjs <<'PEEK_EOF'
+          const t = await fetch(process.env.ACTIONS_ID_TOKEN_REQUEST_URL + '&audience=viralytic-ai', {headers: {Authorization: 'bearer ' + process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}}).then((r) => r.json());
+          const r = await fetch(process.env.APP_URL + '/api/robot/iapaga-peek', {method: 'POST', headers: {Authorization: 'Bearer ' + t.value, 'Content-Type': 'application/json'}, body: '{}'});
+          const j = await r.json().catch(() => ({}));
+          console.log('IA que Paga:', j.work, j.need ?? '', j.reason || '');
+          await import('node:fs').then((fs) => fs.appendFileSync(process.env.GITHUB_OUTPUT, 'work=' + (!!j.work || !r.ok) + String.fromCharCode(10)));
+          PEEK_EOF
+          node peek.mjs
+  videos:
+    needs: revisar
+    if: github.event_name != 'schedule' || needs.revisar.outputs.work == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Instalar ffmpeg, letras y voz gratis (edge-tts)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core > /dev/null
+          sudo apt-get install -y -qq fonts-montserrat > /dev/null || true
+          pip install -q edge-tts pillow numpy
+      - name: Hacer videos
+        env:
+          APP_URL: https://viralytic-ai.pll-studio.workers.dev
+          BUDGET_MIN: '40'
+        run: |
+          cat > iapaga.mjs <<'IAPAGA_EOF'
+          // Robot de "IA que Paga" (corre en GitHub Actions, archivo .github/workflows/iapaga.yml).
+          // 1) Pide a tu app un guion nuevo (la app lo escribe con la IA gratis de Cloudflare).
+          // 2) Pone la voz con edge-tts (gratis) y arma el Short 9:16: fondo de la marca, texto grande de cada
+          //    escena, subtítulos palabra por palabra y tu personaje abajo moviendo la boca con la voz.
+          // 3) Lo deja en "Aprobación". Nunca publica.
+          import {execFileSync} from 'node:child_process';
+          import {mkdirSync, writeFileSync, readFileSync, statSync, existsSync} from 'node:fs';
+          import {join} from 'node:path';
+
+          const APP = (process.env.APP_URL || '').replace(/\/$/, '');
+          const WORK = process.env.WORK_DIR || '/tmp/iapaga';
+          const BUDGET_MIN = Number(process.env.BUDGET_MIN || 40);
+          const MAX_VIDEOS = Number(process.env.MAX_VIDEOS || 12);
+          const T0 = Date.now();
+          const elapsedMin = () => (Date.now() - T0) / 60000;
+          if (!APP) throw Error('Falta APP_URL');
+          const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+          const log = (m) => console.log(new Date().toISOString().slice(11, 19) + ' ' + m);
+
+          // ---------- Acceso a la app: token de identidad de GitHub (OIDC) ----------
+          let cached = {value: '', at: 0};
+          async function credential() {
+            if (process.env.ROBOT_TOKEN) return process.env.ROBOT_TOKEN;
+            if (cached.value && Date.now() - cached.at < 120000) return cached.value;
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL, token = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+            if (!url || !token) throw Error('GitHub no entregó el token de identidad. Revisa "permissions: id-token: write".');
+            const r = await fetch(url + '&audience=viralytic-ai', {headers: {Authorization: 'bearer ' + token}});
+            if (!r.ok) throw Error('No se pudo obtener el token de GitHub (' + r.status + ')');
+            cached = {value: (await r.json()).value, at: Date.now()};
+            return cached.value;
+          }
+          async function request(path, init = {}, tries = 3) {
+            for (let attempt = 1; ; attempt++) {
+              let r;
+              try {
+                r = await fetch(APP + '/api/' + path, {...init, headers: {Authorization: 'Bearer ' + (await credential()), ...(init.headers || {})}, signal: AbortSignal.timeout(300000)});
+              } catch (e) {
+                if (attempt < tries) { await sleep(5000 * attempt); continue; }
+                throw Error('Sin conexión con la app en ' + path + ': ' + e.message);
+              }
+              if (r.status >= 500 && r.status !== 502 && attempt < tries) { await sleep(5000 * attempt); continue; }
+              return r;
+            }
+          }
+          async function api(path, body) {
+            const r = await request(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {})});
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) throw Error(j.error || path + ' respondió ' + r.status);
+            return j;
+          }
+
+          // ---------- Voz gratis con edge-tts (con el tiempo de cada palabra para los subtítulos) ----------
+          const EDGE_PY = `
+          import asyncio, sys, json, edge_tts
+          async def main(text, voice, rate, pitch, out, words):
+              try:
+                  c = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, boundary="WordBoundary")
+              except TypeError:
+                  c = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+              ws = []
+              with open(out, "wb") as f:
+                  async for ch in c.stream():
+                      if ch["type"] == "audio":
+                          f.write(ch["data"])
+                      elif ch["type"] == "WordBoundary":
+                          ws.append({"t": round(ch["offset"] / 1e7, 3), "d": round(ch["duration"] / 1e7, 3), "w": ch["text"]})
+              with open(words, "w", encoding="utf-8") as f:
+                  json.dump(ws, f, ensure_ascii=False)
+          asyncio.run(main(*sys.argv[1:]))
+          `;
+          async function voice(text, v, out, words) {
+            const py = join(WORK, 'edge.py');
+            if (!existsSync(py)) writeFileSync(py, EDGE_PY);
+            let last;
+            for (let a = 1; a <= 4; a++) {
+              try {
+                execFileSync('python3', [py, text, v, '+8%', '+0Hz', out, words], {stdio: ['ignore', 'ignore', 'pipe'], timeout: 120000});
+                if (statSync(out).size > 1000) return JSON.parse(readFileSync(words, 'utf8'));
+                last = Error('audio vacío');
+              } catch (e) {
+                last = Error(String(e.stderr || e.message).trim().split('\n').pop());
+              }
+              await sleep(3000 * a);
+            }
+            throw last;
+          }
+          const duration = (f) => Number(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', f]).toString().trim());
+
+          // ---------- Dibujo: fondos de cada escena y personaje hablando (Python + Pillow + numpy) ----------
+          const DRAW_PY = String.raw`
+          import sys, json, math, numpy as np
+          from PIL import Image, ImageDraw, ImageFont, ImageFilter
+          W, H = 1080, 1920
+          GREEN = (46, 230, 140)
+          cfg = json.load(open(sys.argv[1]))
+          def font(size, bold=True):
+              for f in ['/usr/share/fonts/truetype/montserrat/Montserrat-ExtraBold.ttf', '/usr/share/fonts/opentype/montserrat/Montserrat-ExtraBold.otf',
+                        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf']:
+                  try: return ImageFont.truetype(f, size)
+                  except Exception: pass
+              return ImageFont.load_default()
+          def background():
+              y, x = np.mgrid[0:H, 0:W]
+              t = np.clip(np.sqrt((x - W * 0.5) ** 2 + (y - H * 0.33) ** 2) / (H * 0.75), 0, 1)[..., None]
+              a = (np.array([18, 72, 56]) * (1 - t) + np.array([6, 9, 16]) * t).astype('uint8')
+              img = Image.fromarray(a).convert('RGBA')
+              g = Image.new('RGBA', (W, H), (0, 0, 0, 0)); d = ImageDraw.Draw(g)
+              for i in range(0, W, 90): d.line((i, 0, i, H), fill=(255, 255, 255, 10))
+              for j in range(0, H, 90): d.line((0, j, W, j), fill=(255, 255, 255, 10))
+              return Image.alpha_composite(img, g)
+          def wrap(d, text, f, maxw):
+              words, lines, cur = text.split(), [], ''
+              for w in words:
+                  t = (cur + ' ' + w).strip()
+                  if d.textlength(t, font=f) <= maxw or not cur: cur = t
+                  else: lines.append(cur); cur = w
+              if cur: lines.append(cur)
+              return lines
+          def card(text, i, n, out):
+              img = background(); d = ImageDraw.Draw(img)
+              # Marca arriba
+              fb = font(46)
+              w1 = d.textlength('IA ', font=fb); w2 = d.textlength('QUE PAGA', font=fb)
+              x0 = (W - w1 - w2) / 2
+              d.text((x0, 120), 'IA ', font=fb, fill='white'); d.text((x0 + w1, 120), 'QUE PAGA', font=fb, fill=GREEN)
+              # Barra de avance
+              bw = 600; bx = (W - bw) // 2
+              d.rounded_rectangle((bx, 196, bx + bw, 206), 5, fill=(255, 255, 255, 40))
+              d.rounded_rectangle((bx, 196, bx + int(bw * (i + 1) / n), 206), 5, fill=GREEN)
+              # Texto grande de la escena
+              text = (text or '').strip().upper()
+              size = 112
+              while size > 60:
+                  f = font(size); lines = wrap(d, text, f, W - 140)
+                  if len(lines) <= 3: break
+                  size -= 8
+              f = font(size); lines = wrap(d, text, f, W - 140)[:4]
+              lh = int(size * 1.12); top = 400 - (len(lines) * lh) // 2
+              for k, ln in enumerate(lines):
+                  tw = d.textlength(ln, font=f)
+                  col = GREEN if k == len(lines) - 1 and len(lines) > 1 else (255, 255, 255)
+                  d.text(((W - tw) / 2 + 4, top + k * lh + 6), ln, font=f, fill=(0, 0, 0, 120))
+                  d.text(((W - tw) / 2, top + k * lh), ln, font=f, fill=col)
+              img.convert('RGB').save(out, quality=94)
+
+          def load(path):
+              return Image.open(path).convert('RGB')
+          def align(closed, opened):
+              # Pone la imagen con boca abierta del mismo tamaño y encima exacto de la cerrada (correlación de fase).
+              opened = opened.resize(closed.size, Image.LANCZOS)
+              a = np.asarray(closed.convert('L').resize((closed.width // 4, closed.height // 4)), float)
+              b = np.asarray(opened.convert('L').resize((closed.width // 4, closed.height // 4)), float)
+              A = np.fft.fft2(a - a.mean()); B = np.fft.fft2(b - b.mean())
+              R = A * np.conj(B); R /= np.abs(R) + 1e-9
+              r = np.fft.ifft2(R).real
+              dy, dx = np.unravel_index(np.argmax(r), r.shape)
+              if dy > a.shape[0] // 2: dy -= a.shape[0]
+              if dx > a.shape[1] // 2: dx -= a.shape[1]
+              return opened.transform(opened.size, Image.AFFINE, (1, 0, -dx * 4, 0, 1, -dy * 4), resample=Image.BICUBIC)
+          def mouth_box(closed, opened):
+              a = np.asarray(closed, float); b = np.asarray(opened, float)
+              diff = np.abs(a - b).sum(2)
+              h, w = diff.shape
+              # Solo se busca en la parte media de la cara (donde va la boca).
+              zone = np.zeros_like(diff); zone[int(h * 0.25):int(h * 0.55), int(w * 0.3):int(w * 0.7)] = 1
+              diff = diff * zone
+              thr = np.percentile(diff[zone > 0], 96)
+              ys, xs = np.where(diff > thr)
+              cy, cx = np.median(ys), np.median(xs)
+              ry = min(h * 0.055, max(h * 0.03, np.percentile(np.abs(ys - cy), 90) * 1.4))
+              rx = min(w * 0.13, max(w * 0.07, np.percentile(np.abs(xs - cx), 90) * 1.4))
+              return cx, cy, rx, ry
+          def avatar(cfg):
+              closed = load(cfg['closed']); opened = align(closed, load(cfg['open']))
+              cx, cy, rx, ry = mouth_box(closed, opened)
+              m = Image.new('L', closed.size, 0)
+              ImageDraw.Draw(m).ellipse((cx - rx, cy - ry, cx + rx, cy + ry), fill=255)
+              m = m.filter(ImageFilter.GaussianBlur(max(6, int(min(rx, ry) * 0.35))))
+              talk = closed.copy(); talk.paste(opened, (0, 0), m)
+              # Cabeza y hombros abajo del video: la boca queda al 67% del recuadro y se difuminan las orillas.
+              box_h = 1100
+              s = W / closed.width
+              nw, nh = int(closed.width * s), int(closed.height * s)
+              top = int(max(0, min(nh - box_h, cy * s - box_h * 0.67)))
+              left = (W - nw) // 2
+              yy = np.clip(np.arange(box_h) / 220.0, 0, 1)[:, None] ** 1.5
+              xx = np.ones((1, nw))
+              alpha = Image.fromarray((yy * xx * 255).astype('uint8'))
+              outs = []
+              for k, im in enumerate([closed, talk]):
+                  part = im.resize((nw, nh), Image.LANCZOS).crop((0, top, nw, top + box_h)).convert('RGBA')
+                  part.putalpha(alpha)
+                  canvas = Image.new('RGBA', (W, box_h), (0, 0, 0, 0))
+                  canvas.paste(part, (left, 0), part)
+                  p = cfg['outdir'] + f'/av{k}.png'; canvas.save(p); outs.append(p)
+              print(json.dumps({'mouth': [float(cx), float(cy), float(rx), float(ry)], 'top': top}))
+
+          if cfg['mode'] == 'cards':
+              for c in cfg['cards']: card(c['text'], c['i'], c['n'], c['out'])
+          elif cfg['mode'] == 'avatar':
+              avatar(cfg)
+          elif cfg['mode'] == 'mouth':
+              # Abre la boca cuando la voz suena fuerte (12 cuadros por segundo).
+              import wave
+              w = wave.open(cfg['wav']); sr = w.getframerate(); x = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(float)
+              step = sr // 12; frames = []
+              peak = np.percentile(np.abs(x), 99) + 1
+              for i in range(0, len(x), step):
+                  seg = x[i:i + step]
+                  frames.append(1 if seg.size and np.sqrt((seg ** 2).mean()) / peak > 0.12 else 0)
+              # Evita parpadeos de un solo cuadro.
+              for i in range(1, len(frames) - 1):
+                  if frames[i - 1] == frames[i + 1] != frames[i]: frames[i] = frames[i - 1]
+              lines = ['ffconcat version 1.0']
+              for f in frames: lines += [f"file '{cfg['outdir']}/av{f}.png'", 'duration 0.0833333']
+              lines += [f"file '{cfg['outdir']}/av0.png'"]
+              open(cfg['out'], 'w').write('\n'.join(lines) + '\n')
+          `;
+          function py(cfg) {
+            const f = join(WORK, 'draw.py');
+            if (!existsSync(f)) writeFileSync(f, DRAW_PY);
+            const c = join(WORK, 'cfg-' + Math.random().toString(36).slice(2) + '.json');
+            writeFileSync(c, JSON.stringify(cfg));
+            return execFileSync('python3', [f, c], {stdio: ['ignore', 'pipe', 'inherit'], timeout: 600000}).toString();
+          }
+
+          // ---------- Personaje: se baja una vez por corrida ----------
+          let AV = null;
+          async function avatarReady() {
+            if (AV) return AV;
+            const dir = join(WORK, 'avatar');
+            mkdirSync(dir, {recursive: true});
+            for (const k of ['closed', 'open']) {
+              const r = await request('iapaga-avatar/' + k);
+              if (!r.ok) throw Error('Falta la imagen del personaje (' + k + '). Súbela en la app.');
+              writeFileSync(join(dir, k + '.png'), Buffer.from(await r.arrayBuffer()));
+            }
+            const out = py({mode: 'avatar', closed: join(dir, 'closed.png'), open: join(dir, 'open.png'), outdir: dir});
+            log('Personaje listo ' + out.trim());
+            AV = dir;
+            return dir;
+          }
+
+          // ---------- Subtítulos (ASS) palabra por palabra ----------
+          const assTime = (t) => {
+            t = Math.max(0, t);
+            const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+            return `${h}:${String(m).padStart(2, '0')}:${s.toFixed(2).padStart(5, '0')}`;
+          };
+          const esc = (s) => String(s).replace(/[{}\\]/g, '');
+          function subtitles(words, file) {
+            const head = `[Script Info]
+          ScriptType: v4.00+
+          PlayResX: 1080
+          PlayResY: 1920
+          WrapStyle: 0
+
+          [V4+ Styles]
+          Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+          Style: Sub,Montserrat ExtraBold,68,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,1,0,0,0,100,100,0,0,1,5,2,8,70,70,640,1
+
+          [Events]
+          Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+          `;
+            const ev = [];
+            for (let i = 0; i < words.length; i += 3) {
+              const g = words.slice(i, i + 3);
+              for (let k = 0; k < g.length; k++) {
+                const st = g[k].t, en = k + 1 < g.length ? g[k + 1].t : i + 3 < words.length ? words[i + 3].t : g[k].t + Math.max(0.35, g[k].d || 0.4);
+                const txt = g.map((w, j) => (j === k ? '{\\c&H8CE62E&}' + esc(w.w).toUpperCase() + '{\\c&HFFFFFF&}' : esc(w.w).toUpperCase())).join(' ');
+                ev.push(`Dialogue: 0,${assTime(st)},${assTime(en)},Sub,,0,0,0,,${txt}`);
+              }
+            }
+            writeFileSync(file, head + ev.join('\n') + '\n');
+          }
+
+          // ---------- Un video ----------
+          async function produce(p, v) {
+            const dir = join(WORK, p.id);
+            mkdirSync(dir, {recursive: true});
+            const av = await avatarReady();
+            const n = p.scenes.length;
+            const durations = [], allWords = [], parts = [];
+            let t = 0;
+            for (let i = 0; i < n; i++) {
+              const mp3 = join(dir, `v${i}.mp3`), wj = join(dir, `v${i}.json`);
+              const words = await voice(p.scenes[i].text, p.edgeVoice || v || 'es-MX-JorgeNeural', mp3, wj);
+              const wav = join(dir, `v${i}.wav`);
+              execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', mp3, '-af', 'apad=pad_dur=0.25', '-ar', '44100', '-ac', '1', wav]);
+              const d = Math.min(29.5, Math.max(1.2, duration(wav)));
+              durations.push(Math.round(d * 100) / 100);
+              for (const w of words) allWords.push({...w, t: w.t + t});
+              parts.push(wav);
+              t += d;
+            }
+            // Audio completo
+            const list = join(dir, 'a.txt');
+            writeFileSync(list, parts.map((f) => `file '${f}'`).join('\n'));
+            const wav = join(dir, 'voz.wav');
+            execFileSync('ffmpeg', ['-y', '-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', wav]);
+            // Fondos de cada escena
+            py({mode: 'cards', cards: p.scenes.map((s, i) => ({text: s.card || '', i, n, out: join(dir, `c${i}.jpg`)}))});
+            const cl = join(dir, 'c.txt');
+            writeFileSync(cl, ['ffconcat version 1.0', ...p.scenes.flatMap((_, i) => [`file '${join(dir, `c${i}.jpg`)}'`, `duration ${durations[i]}`]), `file '${join(dir, `c${n - 1}.jpg`)}'`].join('\n'));
+            // Boca
+            const ml = join(dir, 'm.txt');
+            py({mode: 'mouth', wav, outdir: av, out: ml});
+            // Subtítulos
+            const ass = join(dir, 's.ass');
+            subtitles(allWords, ass);
+            const out = join(dir, 'video.mp4');
+            const total = durations.reduce((a, b) => a + b, 0);
+            execFileSync('ffmpeg', [
+              '-y', '-v', 'error',
+              '-f', 'concat', '-safe', '0', '-i', cl,
+              '-f', 'concat', '-safe', '0', '-i', ml,
+              '-i', wav,
+              '-filter_complex', `[0:v]fps=30,scale=1080:1920,setsar=1[bg];[1:v]fps=30,format=rgba[av];[bg][av]overlay=0:820:shortest=0[v1];[v1]ass=${ass}:fontsdir=/usr/share/fonts,format=yuv420p[v]`,
+              '-map', '[v]', '-map', '2:a',
+              '-t', total.toFixed(2),
+              '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-r', '30',
+              '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart',
+              out,
+            ], {stdio: ['ignore', 'inherit', 'inherit'], timeout: 900000});
+            log('Video armado: ' + (statSync(out).size / 1e6).toFixed(1) + ' MB, ' + total.toFixed(1) + ' s');
+            const r = await request('video', {
+              method: 'POST',
+              headers: {'Content-Type': 'video/mp4', 'X-Project-Id': p.id, 'X-Render-Token': p.renderToken, 'X-Scene-Durations': JSON.stringify(durations)},
+              body: readFileSync(out),
+            });
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) throw Error(j.error || 'La app no aceptó el video');
+          }
+
+          async function main() {
+            mkdirSync(WORK, {recursive: true});
+            let made = 0;
+            while (made < MAX_VIDEOS && elapsedMin() < BUDGET_MIN) {
+              let next;
+              try {
+                next = await api('robot/iapaga-next', {});
+              } catch (e) {
+                log('No se pudo pedir el guion: ' + e.message);
+                break;
+              }
+              if (next.action !== 'produce') { log('Nada que hacer: ' + next.reason); break; }
+              const p = next.project;
+              log('Produciendo: ' + p.title);
+              try {
+                await produce(p, next.voice);
+                made++;
+                log('Listo. Espera tu aprobación en la app.');
+              } catch (e) {
+                log('Error: ' + e.message);
+                await api('robot/iapaga-fail', {id: p.id, error: e.message}).catch(() => {});
+                if (/personaje/.test(e.message)) break;
+              }
+            }
+            log(`Terminado: ${made} video(s).`);
+          }
+          await main();
+          IAPAGA_EOF
+          node iapaga.mjs
